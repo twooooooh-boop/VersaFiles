@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,6 +26,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -43,7 +45,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
@@ -61,33 +62,92 @@ private sealed interface UiDialog {
 
 private data class Quick(val name: String, val dir: File, val icon: ImageVector)
 
-@OptIn(ExperimentalMaterial3Api::class)
+private fun categoryIcon(c: Category): ImageVector = when (c) {
+    Category.IMAGES -> Icons.Default.Image
+    Category.VIDEOS -> Icons.Default.Movie
+    Category.AUDIO -> Icons.Default.MusicNote
+    Category.DOCUMENTS -> Icons.Default.Description
+    Category.APKS -> Icons.Default.Android
+    Category.ARCHIVES -> Icons.Default.FolderZip
+}
+
+private fun categoryColor(c: Category): Color = when (c) {
+    Category.IMAGES -> Color(0xFF43A047)
+    Category.VIDEOS -> Color(0xFFE53935)
+    Category.AUDIO -> Color(0xFF8E24AA)
+    Category.DOCUMENTS -> Color(0xFF1E88E5)
+    Category.APKS -> Color(0xFF3DDC84)
+    Category.ARCHIVES -> Color(0xFFF9A825)
+}
+
 @Composable
 fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
     val context = LocalContext.current
-    val roots = remember { storageRoots(context) }
     val snackbar = remember { SnackbarHostState() }
+    remember(vm) {
+        vm.attach(context)
+        true
+    }
+    LaunchedEffect(vm.message) { vm.message?.let { snackbar.showSnackbar(it.text) } }
+
+    Box(Modifier.fillMaxSize()) {
+        FilesContent(vm)
+        if (vm.page == Page.TRASH) TrashScreen(vm)
+        if (vm.page == Page.ANALYZER) AnalyzerScreen(vm)
+        vm.editing?.let { f ->
+            TextEditor(f, onClose = vm::closeEditor, onNotify = vm::showMessage)
+        }
+        vm.viewer?.let { s ->
+            ImageViewer(
+                state = s,
+                onClose = vm::closeViewer,
+                onShare = { shareFiles(context, listOf(it)) }
+            )
+        }
+        SnackbarHost(
+            snackbar,
+            Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FilesContent(vm: FileManagerViewModel) {
+    val context = LocalContext.current
+    val roots = remember { storageRoots(context) }
     var dialog by remember { mutableStateOf<UiDialog?>(null) }
     var menuOpen by remember { mutableStateOf(false) }
     var moreOpen by remember { mutableStateOf(false) }
     val selectedFiles = vm.selectedFiles()
+    val cat = vm.category
+    val inFolder = vm.currentDir != null
+    val showPath = cat != null || vm.query.isNotBlank()
 
     LaunchedEffect(Unit) { vm.setRoots(roots.map { it.dir.absolutePath }) }
-    LaunchedEffect(vm.message) { vm.message?.let { snackbar.showSnackbar(it.text) } }
-    BackHandler(enabled = vm.selected.isNotEmpty() || vm.searching || vm.currentDir != null) {
+    BackHandler(
+        enabled = vm.selected.isNotEmpty() || vm.searching || vm.currentDir != null || cat != null
+    ) {
         vm.back()
     }
 
     val dirNow = vm.currentDir
-    val title = if (dirNow == null) "VersaFiles"
-    else roots.firstOrNull { it.dir.absolutePath == dirNow.absolutePath }?.name
-        ?: dirNow.name.ifEmpty { "/" }
+    val title = when {
+        cat != null -> cat.label
+        dirNow == null -> "VersaFiles"
+        else -> roots.firstOrNull { it.dir.absolutePath == dirNow.absolutePath }?.name
+            ?: dirNow.name.ifEmpty { "/" }
+    }
 
     val onItemClick: (FileItem) -> Unit = { item ->
         when {
             vm.selected.isNotEmpty() -> vm.toggleSelect(item.path)
             item.isDir -> vm.open(item.file)
-            else -> openFile(context, item.file)
+            else -> {
+                if (!vm.openInternally(item)) openFile(context, item.file)
+            }
         }
     }
 
@@ -146,6 +206,43 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                                         shareFiles(context, selectedFiles)
                                     }
                                 )
+                                if (single != null && single.isFile) {
+                                    DropdownMenuItem(
+                                        text = { Text("Open with…") },
+                                        leadingIcon = { Icon(Icons.Default.OpenInNew, contentDescription = null) },
+                                        onClick = {
+                                            moreOpen = false
+                                            openFile(context, single)
+                                        }
+                                    )
+                                }
+                                if (single != null && single.isDirectory) {
+                                    val isFav = single.absolutePath in vm.favorites
+                                    DropdownMenuItem(
+                                        text = { Text(if (isFav) "Remove from favorites" else "Add to favorites") },
+                                        leadingIcon = {
+                                            Icon(
+                                                if (isFav) Icons.Default.StarBorder else Icons.Default.Star,
+                                                contentDescription = null
+                                            )
+                                        },
+                                        onClick = {
+                                            moreOpen = false
+                                            vm.toggleFavorite(single)
+                                            vm.clearSelection()
+                                        }
+                                    )
+                                }
+                                if (single != null && showPath) {
+                                    DropdownMenuItem(
+                                        text = { Text("Show in folder") },
+                                        leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
+                                        onClick = {
+                                            moreOpen = false
+                                            vm.showInFolder(single)
+                                        }
+                                    )
+                                }
                                 if (single != null) {
                                     DropdownMenuItem(
                                         text = { Text("Rename") },
@@ -194,19 +291,19 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                         }
                     },
                     navigationIcon = {
-                        if (vm.searching || vm.currentDir != null) {
+                        if (vm.searching || inFolder || cat != null) {
                             IconButton(onClick = vm::back) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                             }
                         }
                     },
                     actions = {
-                        if (vm.currentDir != null) {
-                            if (!vm.searching) {
-                                IconButton(onClick = vm::startSearch) {
-                                    Icon(Icons.Default.Search, contentDescription = "Search")
-                                }
+                        if (inFolder && !vm.searching) {
+                            IconButton(onClick = vm::startSearch) {
+                                Icon(Icons.Default.Search, contentDescription = "Search")
                             }
+                        }
+                        if (inFolder || cat != null) {
                             IconButton(onClick = vm::toggleView) {
                                 Icon(
                                     if (vm.viewMode == ViewMode.LIST) Icons.Default.GridView
@@ -214,6 +311,8 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                                     contentDescription = "Switch view"
                                 )
                             }
+                        }
+                        if (inFolder) {
                             Box {
                                 IconButton(onClick = { menuOpen = true }) {
                                     Icon(Icons.Default.MoreVert, contentDescription = "Menu")
@@ -279,8 +378,7 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                     ) { Text("Paste here") }
                 }
             }
-        },
-        snackbarHost = { SnackbarHost(snackbar) }
+        }
     ) { padding ->
         Box(
             Modifier
@@ -288,19 +386,25 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                 .fillMaxSize()
         ) {
             val dir = vm.currentDir
-            if (dir == null) {
-                HomeContent(roots) { vm.open(it) }
+            if (dir == null && cat == null) {
+                HomeContent(vm, roots)
             } else {
                 Column(Modifier.fillMaxSize()) {
-                    Breadcrumbs(dir, roots) { vm.open(it) }
-                    HorizontalDivider()
+                    if (dir != null) {
+                        Breadcrumbs(dir, roots) { vm.open(it) }
+                        HorizontalDivider()
+                    }
                     if (vm.items.isEmpty()) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             if (vm.loading) {
                                 CircularProgressIndicator()
                             } else {
                                 Text(
-                                    if (vm.query.isNotBlank()) "No results" else "This folder is empty",
+                                    when {
+                                        vm.query.isNotBlank() -> "No results"
+                                        cat != null -> "Nothing found"
+                                        else -> "This folder is empty"
+                                    },
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
@@ -311,6 +415,7 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                                 FileRow(
                                     item = item,
                                     selected = item.path in vm.selected,
+                                    showPath = showPath,
                                     onClick = { onItemClick(item) },
                                     onLongClick = { vm.toggleSelect(item.path) }
                                 )
@@ -343,12 +448,18 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
         is UiDialog.Delete -> AlertDialog(
             onDismissRequest = { dialog = null },
             title = { Text("Delete") },
-            text = { Text("Delete ${d.files.size} item(s)? This can't be undone.") },
+            text = { Text("Delete ${d.files.size} item(s)? They go to the recycle bin unless you delete them permanently.") },
             confirmButton = {
-                TextButton(onClick = {
-                    vm.delete(d.files)
-                    dialog = null
-                }) { Text("Delete") }
+                Row {
+                    TextButton(onClick = {
+                        vm.delete(d.files, true)
+                        dialog = null
+                    }) { Text("Permanently") }
+                    TextButton(onClick = {
+                        vm.delete(d.files, false)
+                        dialog = null
+                    }) { Text("Recycle bin") }
+                }
             },
             dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancel") } }
         )
@@ -577,7 +688,7 @@ private fun Breadcrumbs(dir: File, roots: List<StorageRoot>, onNavigate: (File) 
 }
 
 @Composable
-private fun SectionTitle(text: String) {
+internal fun SectionTitle(text: String) {
     Text(
         text,
         style = MaterialTheme.typography.titleSmall,
@@ -587,7 +698,58 @@ private fun SectionTitle(text: String) {
 }
 
 @Composable
-private fun HomeContent(roots: List<StorageRoot>, onOpen: (File) -> Unit) {
+private fun CategoryGrid(onOpen: (Category) -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp)
+    ) {
+        Category.entries.chunked(3).forEach { rowItems ->
+            Row(Modifier.fillMaxWidth()) {
+                rowItems.forEach { c ->
+                    Column(
+                        Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onOpen(c) }
+                            .padding(vertical = 10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .background(categoryColor(c).copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(categoryIcon(c), contentDescription = null, tint = categoryColor(c))
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(c.label, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolRow(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.width(16.dp))
+        Text(label, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+@Composable
+private fun HomeContent(vm: FileManagerViewModel, roots: List<StorageRoot>) {
     val quick = remember {
         listOf(
             Quick("Downloads", Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), Icons.Default.Download),
@@ -608,7 +770,7 @@ private fun HomeContent(roots: List<StorageRoot>, onOpen: (File) -> Unit) {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .clickable { onOpen(r.dir) }
+                    .clickable { vm.open(r.dir) }
                     .padding(16.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -631,40 +793,45 @@ private fun HomeContent(roots: List<StorageRoot>, onOpen: (File) -> Unit) {
                 LinearProgressIndicator(progress = { used }, modifier = Modifier.fillMaxWidth())
             }
         }
-        item { SectionTitle("Quick access") }
-        items(quick) { q ->
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clickable { onOpen(q.dir) }
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(q.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.width(16.dp))
-                Text(q.name, style = MaterialTheme.typography.bodyLarge)
+        item { SectionTitle("Categories") }
+        item { CategoryGrid(onOpen = { vm.openCategory(it) }) }
+        if (vm.favorites.isNotEmpty()) {
+            item { SectionTitle("Favorites") }
+            items(vm.favorites, key = { "fav:$it" }) { path ->
+                val f = File(path)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { vm.open(f) }
+                        .padding(start = 16.dp, top = 4.dp, bottom = 4.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(16.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(f.name.ifEmpty { "/" }, style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            path,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(onClick = { vm.toggleFavorite(f) }) {
+                        Icon(Icons.Default.Star, contentDescription = "Remove favorite", tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
             }
         }
+        item { SectionTitle("Quick access") }
+        items(quick) { q ->
+            ToolRow(q.icon, q.name) { vm.open(q.dir) }
+        }
+        item { SectionTitle("Tools") }
+        item { ToolRow(Icons.Default.Delete, "Recycle bin") { vm.openTrash() } }
+        item { ToolRow(Icons.Default.PieChart, "Storage analyzer") { vm.openAnalyzer() } }
     }
-}
-
-@Composable
-private fun FileIcon(kind: FileKind, selected: Boolean, size: Dp = 40.dp) {
-    val scheme = MaterialTheme.colorScheme
-    val (icon, tint) = if (selected) {
-        Icons.Default.CheckCircle to scheme.primary
-    } else when (kind) {
-        FileKind.FOLDER -> Icons.Default.Folder to scheme.primary
-        FileKind.IMAGE -> Icons.Default.Image to Color(0xFF43A047)
-        FileKind.VIDEO -> Icons.Default.VideoFile to Color(0xFFE53935)
-        FileKind.AUDIO -> Icons.Default.AudioFile to Color(0xFF8E24AA)
-        FileKind.ARCHIVE -> Icons.Default.FolderZip to Color(0xFFF9A825)
-        FileKind.TEXT -> Icons.Default.Description to scheme.onSurfaceVariant
-        FileKind.APK -> Icons.Default.Android to Color(0xFF3DDC84)
-        FileKind.PDF -> Icons.Default.PictureAsPdf to Color(0xFFD32F2F)
-        FileKind.OTHER -> Icons.Default.InsertDriveFile to scheme.onSurfaceVariant
-    }
-    Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(size))
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -672,6 +839,7 @@ private fun FileIcon(kind: FileKind, selected: Boolean, size: Dp = 40.dp) {
 private fun FileRow(
     item: FileItem,
     selected: Boolean,
+    showPath: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
@@ -681,10 +849,10 @@ private fun FileRow(
             .fillMaxWidth()
             .background(bg)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        FileIcon(item.kind, selected)
+        FileThumb(item, selected, 44.dp)
         Spacer(Modifier.width(16.dp))
         Column(Modifier.weight(1f)) {
             Text(
@@ -699,6 +867,15 @@ private fun FileRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (showPath) {
+                Text(
+                    item.file.parent ?: "",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
         }
     }
 }
@@ -720,7 +897,7 @@ private fun FileCell(
             .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        FileIcon(item.kind, selected, 48.dp)
+        FileThumb(item, selected, 88.dp)
         Spacer(Modifier.height(4.dp))
         Text(
             item.name,

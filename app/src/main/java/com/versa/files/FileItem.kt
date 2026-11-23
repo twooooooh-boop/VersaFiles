@@ -31,20 +31,20 @@ private val extractableExts = setOf("zip", "7z", "love", "jar")
 fun isExtractable(f: File): Boolean =
     f.isFile && f.extension.lowercase(Locale.ROOT) in extractableExts
 
-fun kindOf(f: File): FileKind {
-    if (f.isDirectory) return FileKind.FOLDER
-    return when (f.extension.lowercase(Locale.ROOT)) {
-        "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic" -> FileKind.IMAGE
-        "mp4", "mkv", "webm", "avi", "mov", "3gp" -> FileKind.VIDEO
-        "mp3", "wav", "flac", "ogg", "m4a", "aac", "opus" -> FileKind.AUDIO
-        "zip", "7z", "love", "jar", "rar", "tar", "gz" -> FileKind.ARCHIVE
-        "txt", "md", "json", "xml", "kt", "java", "py", "lua", "html", "css", "js",
-        "log", "csv", "yml", "yaml", "ini", "conf", "sh" -> FileKind.TEXT
-        "apk" -> FileKind.APK
-        "pdf" -> FileKind.PDF
-        else -> FileKind.OTHER
-    }
+fun kindOfExt(ext: String): FileKind = when (ext) {
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic" -> FileKind.IMAGE
+    "mp4", "mkv", "webm", "avi", "mov", "3gp" -> FileKind.VIDEO
+    "mp3", "wav", "flac", "ogg", "m4a", "aac", "opus" -> FileKind.AUDIO
+    "zip", "7z", "love", "jar", "rar", "tar", "gz" -> FileKind.ARCHIVE
+    "txt", "md", "json", "xml", "kt", "java", "py", "lua", "html", "css", "js",
+    "log", "csv", "yml", "yaml", "ini", "conf", "sh" -> FileKind.TEXT
+    "apk" -> FileKind.APK
+    "pdf" -> FileKind.PDF
+    else -> FileKind.OTHER
 }
+
+fun kindOf(f: File): FileKind =
+    if (f.isDirectory) FileKind.FOLDER else kindOfExt(f.extension.lowercase(Locale.ROOT))
 
 fun toItem(f: File, withCount: Boolean): FileItem {
     val dir = f.isDirectory
