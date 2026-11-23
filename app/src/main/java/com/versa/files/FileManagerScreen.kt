@@ -176,7 +176,7 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
                             LaunchedEffect(Unit) { focus.requestFocus() }
                             TextField(
                                 value = vm.query,
-                                onValueChange = { vm.setQuery(it) },
+                                onValueChange = { vm.updateQuery(it) },
                                 placeholder = { Text("Search in this folder") },
                                 singleLine = true,
                                 colors = TextFieldDefaults.colors(

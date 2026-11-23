@@ -109,7 +109,7 @@ class FileManagerViewModel : ViewModel() {
         refresh()
     }
 
-    fun setQuery(q: String) {
+    fun updateQuery(q: String) {
         query = q
         refresh()
     }
