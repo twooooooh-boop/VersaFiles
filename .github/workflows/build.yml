@@ -1,10 +1,17 @@
 name: Build APK and Release
 
 on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - 'README.md'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+env:
+  NTFY_TOPIC: versafiles-014ca5851f7b
 
 jobs:
   build:
@@ -23,9 +30,10 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build release APK
+        shell: bash
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon
+          ./gradlew assembleRelease --no-daemon 2>&1 | tee build.log
 
       - name: Rename APK
         run: cp app/build/outputs/apk/release/app-release.apk VersaFiles-build-${{ github.run_number }}.apk
@@ -44,3 +52,31 @@ jobs:
           name: VersaFiles build ${{ github.run_number }}
           body: Release build (optimized, signed) from commit ${{ github.sha }}
           files: VersaFiles-build-${{ github.run_number }}.apk
+
+      - name: Notify phone
+        if: always()
+        shell: bash
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          REL_URL="${{ github.server_url }}/${{ github.repository }}/releases/latest"
+          if [ "${{ job.status }}" = "success" ]; then
+            curl -s \
+              -H "Title: VersaFiles build ${{ github.run_number }} succeeded" \
+              -H "Tags: white_check_mark" \
+              -H "Click: $REL_URL" \
+              -d "The APK is ready in Releases. Tap to open." \
+              "https://ntfy.sh/$NTFY_TOPIC"
+          else
+            ERRORS=""
+            if [ -f build.log ]; then
+              ERRORS=$(grep -E "^e: |What went wrong|error:|Execution failed" build.log | head -8 | cut -c1-300 | sed 's#file:///home/runner/work/[^/]*/[^/]*/##')
+            fi
+            if [ -z "$ERRORS" ]; then ERRORS="Open the run to see details."; fi
+            curl -s \
+              -H "Title: VersaFiles build ${{ github.run_number }} FAILED" \
+              -H "Priority: high" \
+              -H "Tags: x" \
+              -H "Click: $RUN_URL" \
+              -d "$ERRORS" \
+              "https://ntfy.sh/$NTFY_TOPIC"
+          fi
