@@ -45,7 +45,7 @@ import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TextEditor(file: File, onClose: () -> Unit, onNotify: (String) -> Unit) {
+fun TextEditor(file: File, fontSize: Int, onClose: () -> Unit, onNotify: (String) -> Unit) {
     var original by remember(file) { mutableStateOf<String?>(null) }
     var text by remember(file) { mutableStateOf("") }
     var confirmExit by remember { mutableStateOf(false) }
@@ -136,7 +136,7 @@ fun TextEditor(file: File, onClose: () -> Unit, onNotify: (String) -> Unit) {
                     onValueChange = { text = it },
                     textStyle = TextStyle(
                         fontFamily = FontFamily.Monospace,
-                        fontSize = 13.sp,
+                        fontSize = fontSize.sp,
                         color = MaterialTheme.colorScheme.onSurface
                     ),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),

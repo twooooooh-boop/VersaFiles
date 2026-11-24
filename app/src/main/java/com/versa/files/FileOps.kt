@@ -27,19 +27,32 @@ object FileOps {
 
     fun cleanName(name: String): String = name.replace('/', '_').trim()
 
-    fun list(dir: File, showHidden: Boolean, sort: SortBy, ascending: Boolean): List<FileItem> {
+    fun list(
+        dir: File,
+        showHidden: Boolean,
+        sort: SortBy,
+        ascending: Boolean,
+        foldersFirst: Boolean = true
+    ): List<FileItem> {
         val children = dir.listFiles() ?: return emptyList()
-        val items = children
-            .filter { showHidden || !it.name.startsWith(".") }
-            .map { toItem(it, true) }
+        val items = ArrayList<FileItem>(children.size)
+        for (c in children) {
+            if (!showHidden && c.name.startsWith(".")) continue
+            items.add(toItem(c))
+        }
+        val base = Comparator<FileItem> { a, b -> naturalCompare(a.nameKey, b.nameKey) }
         val cmp: Comparator<FileItem> = when (sort) {
-            SortBy.NAME -> compareBy<FileItem> { it.name.lowercase() }
-            SortBy.SIZE -> compareBy<FileItem> { it.size }
-            SortBy.DATE -> compareBy<FileItem> { it.modified }
-            SortBy.TYPE -> compareBy<FileItem>({ it.file.extension.lowercase() }, { it.name.lowercase() })
+            SortBy.NAME -> base
+            SortBy.SIZE -> compareBy<FileItem> { it.size }.then(base)
+            SortBy.DATE -> compareBy<FileItem> { it.modified }.then(base)
+            SortBy.TYPE -> compareBy<FileItem> { it.nameKey.substringAfterLast('.', "") }.then(base)
         }
         val ordered = if (ascending) cmp else cmp.reversed()
-        return items.sortedWith(compareByDescending<FileItem> { it.isDir }.then(ordered))
+        return if (foldersFirst) {
+            items.sortedWith(compareByDescending<FileItem> { it.isDir }.then(ordered))
+        } else {
+            items.sortedWith(ordered)
+        }
     }
 
     fun search(
@@ -60,7 +73,7 @@ object FileOps {
                 if (f == root) return@forEach
                 if (!showHidden && f.name.startsWith(".")) return@forEach
                 if (f.name.lowercase().contains(q)) {
-                    out.add(toItem(f, false))
+                    out.add(toItem(f))
                     if (out.size >= limit) return out
                 }
             }

@@ -1,7 +1,7 @@
 package com.versa.files
 
+import androidx.compose.runtime.Immutable
 import java.io.File
-import java.text.DecimalFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -14,17 +14,17 @@ enum class ViewMode { LIST, GRID }
 
 enum class FileKind { FOLDER, IMAGE, VIDEO, AUDIO, ARCHIVE, TEXT, APK, PDF, OTHER }
 
+@Immutable
 data class FileItem(
     val file: File,
     val name: String,
+    val nameKey: String,
+    val path: String,
     val isDir: Boolean,
     val size: Long,
     val modified: Long,
-    val kind: FileKind,
-    val childCount: Int
-) {
-    val path: String get() = file.absolutePath
-}
+    val kind: FileKind
+)
 
 private val extractableExts = setOf("zip", "7z", "love", "jar")
 
@@ -46,30 +46,88 @@ fun kindOfExt(ext: String): FileKind = when (ext) {
 fun kindOf(f: File): FileKind =
     if (f.isDirectory) FileKind.FOLDER else kindOfExt(f.extension.lowercase(Locale.ROOT))
 
-fun toItem(f: File, withCount: Boolean): FileItem {
+fun toItem(f: File): FileItem {
     val dir = f.isDirectory
+    val name = f.name
     return FileItem(
         file = f,
-        name = f.name,
+        name = name,
+        nameKey = name.lowercase(Locale.ROOT),
+        path = f.absolutePath,
         isDir = dir,
         size = if (dir) 0L else f.length(),
         modified = f.lastModified(),
-        kind = kindOf(f),
-        childCount = if (dir && withCount) (f.list()?.size ?: 0) else 0
+        kind = if (dir) FileKind.FOLDER
+        else kindOfExt(name.substringAfterLast('.', "").lowercase(Locale.ROOT))
     )
 }
 
-fun formatSize(bytes: Long): String {
-    if (bytes < 1024) return "$bytes B"
+/** Compares strings so that "file2" sorts before "file10". Inputs should be lowercase. */
+fun naturalCompare(a: String, b: String): Int {
+    var i = 0
+    var j = 0
+    while (i < a.length && j < b.length) {
+        val ca = a[i]
+        val cb = b[j]
+        if (ca.isDigit() && cb.isDigit()) {
+            var ei = i
+            while (ei < a.length && a[ei].isDigit()) ei++
+            var ej = j
+            while (ej < b.length && b[ej].isDigit()) ej++
+            val na = a.substring(i, ei).trimStart('0')
+            val nb = b.substring(j, ej).trimStart('0')
+            if (na.length != nb.length) return na.length - nb.length
+            val c = na.compareTo(nb)
+            if (c != 0) return c
+            i = ei
+            j = ej
+        } else {
+            if (ca != cb) return ca.compareTo(cb)
+            i++
+            j++
+        }
+    }
+    return (a.length - i) - (b.length - j)
+}
+
+fun formatSize(bytes: Long, binary: Boolean = true): String {
+    val base = if (binary) 1024.0 else 1000.0
+    if (bytes < base) return "$bytes B"
     val units = arrayOf("KB", "MB", "GB", "TB")
     var v = bytes.toDouble()
     var i = -1
-    while (v >= 1024 && i < units.lastIndex) {
-        v /= 1024
+    while (v >= base && i < units.lastIndex) {
+        v /= base
         i++
     }
-    return DecimalFormat("#.##").format(v) + " " + units[i]
+    val r = (v * 100).toLong() / 100.0
+    val text = if (r % 1.0 == 0.0) r.toLong().toString() else r.toString()
+    return "$text ${units[i]}"
 }
 
-fun formatDate(ms: Long): String =
-    SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()).format(Date(ms))
+private object Fmt {
+    val detailed: ThreadLocal<SimpleDateFormat> =
+        ThreadLocal.withInitial { SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()) }
+    val iso: ThreadLocal<SimpleDateFormat> =
+        ThreadLocal.withInitial { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()) }
+    val short: ThreadLocal<SimpleDateFormat> =
+        ThreadLocal.withInitial { SimpleDateFormat("dd MMM yyyy", Locale.getDefault()) }
+}
+
+fun formatDate(ms: Long, style: DateStyle = DateStyle.DETAILED): String = when (style) {
+    DateStyle.DETAILED -> Fmt.detailed.get()!!.format(Date(ms))
+    DateStyle.ISO -> Fmt.iso.get()!!.format(Date(ms))
+    DateStyle.RELATIVE -> {
+        val diff = System.currentTimeMillis() - ms
+        val minute = 60_000L
+        val hour = 3_600_000L
+        val day = 86_400_000L
+        when {
+            diff < minute -> "Just now"
+            diff < hour -> "${diff / minute} min ago"
+            diff < day -> "${diff / hour} h ago"
+            diff < 7 * day -> "${diff / day} d ago"
+            else -> Fmt.short.get()!!.format(Date(ms))
+        }
+    }
+}

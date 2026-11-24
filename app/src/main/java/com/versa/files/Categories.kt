@@ -21,6 +21,9 @@ object Categories {
         exts.joinToString(" OR ", "(", ")") { "$column LIKE ?" } to
             exts.map { "%.$it" }.toTypedArray()
 
+    private fun isHiddenPath(path: String): Boolean =
+        path.split('/').any { part -> part.length > 1 && part.startsWith(".") }
+
     @Suppress("DEPRECATION")
     fun query(context: Context, c: Category, showHidden: Boolean, limit: Int = 3000): List<FileItem> {
         val uri = MediaStore.Files.getContentUri("external")
@@ -48,8 +51,44 @@ object Categories {
                 val path = it.getString(idx) ?: continue
                 val f = File(path)
                 if (!f.isFile) continue
-                if (!showHidden && path.split('/').any { part -> part.length > 1 && part.startsWith(".") }) continue
-                out.add(toItem(f, false))
+                if (!showHidden && isHiddenPath(path)) continue
+                out.add(toItem(f))
+            }
+        }
+        return out
+    }
+
+    @Suppress("DEPRECATION")
+    fun recent(context: Context, limit: Int, showHidden: Boolean): List<FileItem> {
+        val uri = MediaStore.Files.getContentUri("external")
+        val data = MediaStore.Files.FileColumns.DATA
+        val mediaType = MediaStore.Files.FileColumns.MEDIA_TYPE
+        val selection = "($mediaType IN (?,?,?) OR $data LIKE ? OR $data LIKE ? OR $data LIKE ?)"
+        val args = arrayOf(
+            MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
+            MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString(),
+            MediaStore.Files.FileColumns.MEDIA_TYPE_AUDIO.toString(),
+            "%.pdf", "%.apk", "%.zip"
+        )
+        val out = ArrayList<FileItem>()
+        val cursor = context.contentResolver.query(
+            uri,
+            arrayOf(data),
+            selection,
+            args,
+            "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
+        ) ?: return out
+        cursor.use {
+            val idx = it.getColumnIndexOrThrow(data)
+            var scanned = 0
+            while (it.moveToNext() && out.size < limit && scanned < 400) {
+                scanned++
+                val path = it.getString(idx) ?: continue
+                if (path.contains("/Android/")) continue
+                val f = File(path)
+                if (!f.isFile) continue
+                if (!showHidden && isHiddenPath(path)) continue
+                out.add(toItem(f))
             }
         }
         return out

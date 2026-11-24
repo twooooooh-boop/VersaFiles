@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -21,11 +22,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -42,11 +45,12 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -56,11 +60,14 @@ private sealed interface UiDialog {
     data class Rename(val file: File) : UiDialog
     data object NewFolder : UiDialog
     data object NewFile : UiDialog
+    data object GoTo : UiDialog
     data class Compress(val files: List<File>) : UiDialog
     data class Info(val file: File) : UiDialog
 }
 
 private data class Quick(val name: String, val dir: File, val icon: ImageVector)
+
+private data class StorageInfo(val root: StorageRoot, val total: Long, val free: Long)
 
 private fun categoryIcon(c: Category): ImageVector = when (c) {
     Category.IMAGES -> Icons.Default.Image
@@ -81,26 +88,40 @@ private fun categoryColor(c: Category): Color = when (c) {
 }
 
 @Composable
-fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
+fun FileManagerScreen(vm: FileManagerViewModel) {
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
-    remember(vm) {
-        vm.attach(context)
-        true
+    LaunchedEffect(vm.message) {
+        val m = vm.message ?: return@LaunchedEffect
+        val result = snackbar.showSnackbar(
+            message = m.text,
+            actionLabel = m.actionLabel,
+            duration = if (m.actionLabel != null) SnackbarDuration.Long else SnackbarDuration.Short
+        )
+        if (result == SnackbarResult.ActionPerformed) m.action?.invoke()
     }
-    LaunchedEffect(vm.message) { vm.message?.let { snackbar.showSnackbar(it.text) } }
 
     Box(Modifier.fillMaxSize()) {
         FilesContent(vm)
-        if (vm.page == Page.TRASH) TrashScreen(vm)
-        if (vm.page == Page.ANALYZER) AnalyzerScreen(vm)
+        when (vm.page) {
+            Page.TRASH -> TrashScreen(vm)
+            Page.ANALYZER -> AnalyzerScreen(vm)
+            Page.DUPLICATES -> DuplicatesScreen(vm)
+            Page.SETTINGS -> SettingsScreen(vm)
+            Page.FILES -> {}
+        }
         vm.editing?.let { f ->
-            TextEditor(f, onClose = vm::closeEditor, onNotify = vm::showMessage)
+            TextEditor(
+                file = f,
+                fontSize = vm.settings.editorFontSize,
+                onClose = { vm.closeEditor() },
+                onNotify = { vm.showMessage(it) }
+            )
         }
         vm.viewer?.let { s ->
             ImageViewer(
                 state = s,
-                onClose = vm::closeViewer,
+                onClose = { vm.closeViewer() },
                 onShare = { shareFiles(context, listOf(it)) }
             )
         }
@@ -117,14 +138,17 @@ fun FileManagerScreen(vm: FileManagerViewModel = viewModel()) {
 @Composable
 private fun FilesContent(vm: FileManagerViewModel) {
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val roots = remember { storageRoots(context) }
     var dialog by remember { mutableStateOf<UiDialog?>(null) }
     var menuOpen by remember { mutableStateOf(false) }
     var moreOpen by remember { mutableStateOf(false) }
-    val selectedFiles = vm.selectedFiles()
+    val selectedFiles = remember(vm.selected, vm.items) { vm.selectedFiles() }
     val cat = vm.category
     val inFolder = vm.currentDir != null
+    val atHome = !inFolder && cat == null
     val showPath = cat != null || vm.query.isNotBlank()
+    val settings = vm.settings
 
     LaunchedEffect(Unit) { vm.setRoots(roots.map { it.dir.absolutePath }) }
     BackHandler(
@@ -151,18 +175,23 @@ private fun FilesContent(vm: FileManagerViewModel) {
         }
     }
 
+    val requestDelete: () -> Unit = {
+        if (settings.confirmDelete) dialog = UiDialog.Delete(selectedFiles)
+        else vm.delete(selectedFiles, false)
+    }
+
     Scaffold(
         topBar = {
             if (vm.selected.isNotEmpty()) {
                 TopAppBar(
                     title = { Text("${vm.selected.size} selected") },
                     navigationIcon = {
-                        IconButton(onClick = vm::clearSelection) {
+                        IconButton(onClick = { vm.clearSelection() }) {
                             Icon(Icons.Default.Close, contentDescription = "Clear selection")
                         }
                     },
                     actions = {
-                        IconButton(onClick = vm::selectAll) {
+                        IconButton(onClick = { vm.selectAll() }) {
                             Icon(Icons.Default.SelectAll, contentDescription = "Select all")
                         }
                         IconButton(onClick = { vm.copySelected(false) }) {
@@ -171,7 +200,7 @@ private fun FilesContent(vm: FileManagerViewModel) {
                         IconButton(onClick = { vm.copySelected(true) }) {
                             Icon(Icons.Default.ContentCut, contentDescription = "Cut")
                         }
-                        IconButton(onClick = { dialog = UiDialog.Delete(selectedFiles) }) {
+                        IconButton(onClick = requestDelete) {
                             Icon(Icons.Default.Delete, contentDescription = "Delete")
                         }
                         Box {
@@ -204,6 +233,14 @@ private fun FilesContent(vm: FileManagerViewModel) {
                                     onClick = {
                                         moreOpen = false
                                         shareFiles(context, selectedFiles)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Invert selection") },
+                                    leadingIcon = { Icon(Icons.Default.FlipToBack, contentDescription = null) },
+                                    onClick = {
+                                        moreOpen = false
+                                        vm.invertSelection()
                                     }
                                 )
                                 if (single != null && single.isFile) {
@@ -244,6 +281,15 @@ private fun FilesContent(vm: FileManagerViewModel) {
                                     )
                                 }
                                 if (single != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("Copy path") },
+                                        leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null) },
+                                        onClick = {
+                                            moreOpen = false
+                                            clipboard.setText(AnnotatedString(single.absolutePath))
+                                            vm.showMessage("Path copied")
+                                        }
+                                    )
                                     DropdownMenuItem(
                                         text = { Text("Rename") },
                                         leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null) },
@@ -292,19 +338,24 @@ private fun FilesContent(vm: FileManagerViewModel) {
                     },
                     navigationIcon = {
                         if (vm.searching || inFolder || cat != null) {
-                            IconButton(onClick = vm::back) {
+                            IconButton(onClick = { vm.back() }) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                             }
                         }
                     },
                     actions = {
+                        if (atHome) {
+                            IconButton(onClick = { vm.openSettings() }) {
+                                Icon(Icons.Default.Settings, contentDescription = "Settings")
+                            }
+                        }
                         if (inFolder && !vm.searching) {
-                            IconButton(onClick = vm::startSearch) {
+                            IconButton(onClick = { vm.startSearch() }) {
                                 Icon(Icons.Default.Search, contentDescription = "Search")
                             }
                         }
                         if (inFolder || cat != null) {
-                            IconButton(onClick = vm::toggleView) {
+                            IconButton(onClick = { vm.toggleView() }) {
                                 Icon(
                                     if (vm.viewMode == ViewMode.LIST) Icons.Default.GridView
                                     else Icons.AutoMirrored.Filled.ViewList,
@@ -332,6 +383,22 @@ private fun FilesContent(vm: FileManagerViewModel) {
                                         onClick = {
                                             menuOpen = false
                                             dialog = UiDialog.NewFile
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Go to path…") },
+                                        leadingIcon = { Icon(Icons.Default.DriveFileMove, contentDescription = null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            dialog = UiDialog.GoTo
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Refresh") },
+                                        leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            vm.refresh()
                                         }
                                     )
                                     HorizontalDivider()
@@ -371,9 +438,9 @@ private fun FilesContent(vm: FileManagerViewModel) {
                             .padding(start = 16.dp)
                             .weight(1f)
                     )
-                    TextButton(onClick = vm::cancelClipboard) { Text("Cancel") }
+                    TextButton(onClick = { vm.cancelClipboard() }) { Text("Cancel") }
                     Button(
-                        onClick = vm::paste,
+                        onClick = { vm.paste() },
                         modifier = Modifier.padding(horizontal = 8.dp)
                     ) { Text("Paste here") }
                 }
@@ -387,7 +454,9 @@ private fun FilesContent(vm: FileManagerViewModel) {
         ) {
             val dir = vm.currentDir
             if (dir == null && cat == null) {
-                HomeContent(vm, roots)
+                HomeContent(vm, roots) { item ->
+                    if (!vm.openInternally(item, vm.recent)) openFile(context, item.file)
+                }
             } else {
                 Column(Modifier.fillMaxSize()) {
                     if (dir != null) {
@@ -422,8 +491,13 @@ private fun FilesContent(vm: FileManagerViewModel) {
                             }
                         }
                     } else {
+                        val cell = when (settings.thumbSize) {
+                            0 -> 88.dp
+                            2 -> 136.dp
+                            else -> 108.dp
+                        }
                         LazyVerticalGrid(
-                            columns = GridCells.Adaptive(104.dp),
+                            columns = GridCells.Adaptive(cell),
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(8.dp)
                         ) {
@@ -493,6 +567,16 @@ private fun FilesContent(vm: FileManagerViewModel) {
             },
             onDismiss = { dialog = null }
         )
+        UiDialog.GoTo -> TextInputDialog(
+            title = "Go to path",
+            initial = vm.currentDir?.absolutePath ?: "",
+            confirm = "Go",
+            onConfirm = {
+                vm.goTo(it)
+                dialog = null
+            },
+            onDismiss = { dialog = null }
+        )
         is UiDialog.Compress -> CompressDialog(
             files = d.files,
             onConfirm = { name, format ->
@@ -501,7 +585,7 @@ private fun FilesContent(vm: FileManagerViewModel) {
             },
             onDismiss = { dialog = null }
         )
-        is UiDialog.Info -> InfoDialog(d.file) { dialog = null }
+        is UiDialog.Info -> InfoDialog(d.file, settings) { dialog = null }
     }
 }
 
@@ -587,19 +671,51 @@ private fun CompressDialog(
 }
 
 @Composable
-private fun InfoDialog(file: File, onDismiss: () -> Unit) {
+private fun InfoDialog(file: File, settings: Settings, onDismiss: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
     val size by produceState("Calculating…", file) {
-        value = withContext(Dispatchers.IO) { formatSize(FileOps.totalSize(file)) }
+        value = withContext(Dispatchers.IO) {
+            formatSize(FileOps.totalSize(file), settings.binaryUnits)
+        }
+    }
+    var md5 by remember(file) { mutableStateOf<String?>(null) }
+    var sha by remember(file) { mutableStateOf<String?>(null) }
+    var hashing by remember(file) { mutableStateOf(false) }
+    LaunchedEffect(hashing) {
+        if (hashing) {
+            val r = withContext(Dispatchers.IO) {
+                try {
+                    Hashes.hash(file, "MD5") to Hashes.hash(file, "SHA-256")
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            md5 = r?.first ?: "error"
+            sha = r?.second ?: "error"
+            hashing = false
+        }
     }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(file.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
         text = {
-            Column {
+            Column(Modifier.verticalScrollCompat()) {
                 InfoLine("Path", file.absolutePath)
                 InfoLine("Size", size)
-                InfoLine("Modified", formatDate(file.lastModified()))
+                InfoLine("Modified", formatDate(file.lastModified(), settings.dateStyle))
                 InfoLine("Type", if (file.isDirectory) "Folder" else mimeOf(file))
+                if (file.isFile) {
+                    if (md5 == null && !hashing) {
+                        TextButton(onClick = { hashing = true }) { Text("Calculate checksums") }
+                    } else if (hashing) {
+                        Text("Calculating…", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        val m = md5 ?: ""
+                        val s = sha ?: ""
+                        InfoLine("MD5 (tap to copy)", m, onClick = { clipboard.setText(AnnotatedString(m)) })
+                        InfoLine("SHA-256 (tap to copy)", s, onClick = { clipboard.setText(AnnotatedString(s)) })
+                    }
+                }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("OK") } }
@@ -607,8 +723,17 @@ private fun InfoDialog(file: File, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun InfoLine(label: String, value: String) {
-    Column(Modifier.padding(vertical = 4.dp)) {
+private fun Modifier.verticalScrollCompat(): Modifier =
+    this.then(Modifier.verticalScroll(rememberScrollState()))
+
+@Composable
+private fun InfoLine(label: String, value: String, onClick: (() -> Unit)? = null) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(vertical = 4.dp)
+    ) {
         Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
         Text(value, style = MaterialTheme.typography.bodyMedium)
     }
@@ -641,21 +766,24 @@ private fun BusyOverlay(text: String) {
 
 @Composable
 private fun Breadcrumbs(dir: File, roots: List<StorageRoot>, onNavigate: (File) -> Unit) {
-    val root = roots
-        .filter {
-            dir.absolutePath == it.dir.absolutePath ||
-                dir.absolutePath.startsWith(it.dir.absolutePath + "/")
+    val crumbs = remember(dir, roots) {
+        val root = roots
+            .filter {
+                dir.absolutePath == it.dir.absolutePath ||
+                    dir.absolutePath.startsWith(it.dir.absolutePath + "/")
+            }
+            .maxByOrNull { it.dir.absolutePath.length }
+        val list = ArrayList<Pair<String, File>>()
+        var cur: File? = dir
+        while (cur != null) {
+            if (root != null && cur.absolutePath == root.dir.absolutePath) {
+                list.add(0, root.name to cur)
+                break
+            }
+            list.add(0, cur.name.ifEmpty { "/" } to cur)
+            cur = cur.parentFile
         }
-        .maxByOrNull { it.dir.absolutePath.length }
-    val crumbs = ArrayList<Pair<String, File>>()
-    var cur: File? = dir
-    while (cur != null) {
-        if (root != null && cur.absolutePath == root.dir.absolutePath) {
-            crumbs.add(0, root.name to cur)
-            break
-        }
-        crumbs.add(0, cur.name.ifEmpty { "/" } to cur)
-        cur = cur.parentFile
+        list
     }
     val scroll = rememberScrollState()
     Row(
@@ -748,8 +876,14 @@ private fun ToolRow(icon: ImageVector, label: String, onClick: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HomeContent(vm: FileManagerViewModel, roots: List<StorageRoot>) {
+private fun HomeContent(
+    vm: FileManagerViewModel,
+    roots: List<StorageRoot>,
+    onOpenRecent: (FileItem) -> Unit
+) {
+    val st = vm.settings
     val quick = remember {
         listOf(
             Quick("Downloads", Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), Icons.Default.Download),
@@ -761,40 +895,72 @@ private fun HomeContent(vm: FileManagerViewModel, roots: List<StorageRoot>) {
         ).filter { it.dir.exists() }
     }
     val primaryPath = remember { Environment.getExternalStorageDirectory().absolutePath }
+    val spaces = remember(roots) { roots.map { StorageInfo(it, it.dir.totalSpace, it.dir.freeSpace) } }
+
     LazyColumn(Modifier.fillMaxSize()) {
         item { SectionTitle("Storage") }
-        items(roots) { r ->
-            val total = r.dir.totalSpace
-            val free = r.dir.freeSpace
-            val used = if (total > 0) (total - free).toFloat() / total.toFloat() else 0f
-            Column(
-                Modifier
+        items(spaces) { info ->
+            val used = if (info.total > 0) (info.total - info.free).toFloat() / info.total.toFloat() else 0f
+            Card(
+                onClick = { vm.open(info.root.dir) },
+                modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { vm.open(r.dir) }
-                    .padding(16.dp)
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        if (r.dir.absolutePath == primaryPath) Icons.Default.PhoneAndroid else Icons.Default.SdCard,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(Modifier.width(16.dp))
-                    Column {
-                        Text(r.name, style = MaterialTheme.typography.bodyLarge)
-                        Text(
-                            "${formatSize(free)} free of ${formatSize(total)}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                Column(Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            if (info.root.dir.absolutePath == primaryPath) Icons.Default.PhoneAndroid else Icons.Default.SdCard,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
                         )
+                        Spacer(Modifier.width(16.dp))
+                        Column {
+                            Text(info.root.name, style = MaterialTheme.typography.bodyLarge)
+                            Text(
+                                "${formatSize(info.free, st.binaryUnits)} free of ${formatSize(info.total, st.binaryUnits)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
+                    Spacer(Modifier.height(10.dp))
+                    LinearProgressIndicator(progress = { used }, modifier = Modifier.fillMaxWidth())
                 }
-                Spacer(Modifier.height(8.dp))
-                LinearProgressIndicator(progress = { used }, modifier = Modifier.fillMaxWidth())
             }
         }
-        item { SectionTitle("Categories") }
-        item { CategoryGrid(onOpen = { vm.openCategory(it) }) }
+        if (st.showRecent && vm.recent.isNotEmpty()) {
+            item { SectionTitle("Recent") }
+            item {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(vm.recent, key = { it.path }) { item ->
+                        Column(
+                            Modifier
+                                .width(88.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { onOpenRecent(item) },
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            FileThumb(item, false, 88.dp)
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                item.name,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        if (st.showCategories) {
+            item { SectionTitle("Categories") }
+            item { CategoryGrid(onOpen = { vm.openCategory(it) }) }
+        }
         if (vm.favorites.isNotEmpty()) {
             item { SectionTitle("Favorites") }
             items(vm.favorites, key = { "fav:$it" }) { path ->
@@ -824,13 +990,18 @@ private fun HomeContent(vm: FileManagerViewModel, roots: List<StorageRoot>) {
                 }
             }
         }
-        item { SectionTitle("Quick access") }
-        items(quick) { q ->
-            ToolRow(q.icon, q.name) { vm.open(q.dir) }
+        if (st.showQuickAccess) {
+            item { SectionTitle("Quick access") }
+            items(quick) { q ->
+                ToolRow(q.icon, q.name) { vm.open(q.dir) }
+            }
         }
         item { SectionTitle("Tools") }
         item { ToolRow(Icons.Default.Delete, "Recycle bin") { vm.openTrash() } }
         item { ToolRow(Icons.Default.PieChart, "Storage analyzer") { vm.openAnalyzer() } }
+        item { ToolRow(Icons.Default.ContentCopy, "Duplicate finder") { vm.openDuplicates() } }
+        item { ToolRow(Icons.Default.Settings, "Settings") { vm.openSettings() } }
+        item { Spacer(Modifier.height(24.dp)) }
     }
 }
 
@@ -843,16 +1014,44 @@ private fun FileRow(
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
+    val st = LocalSettings.current
+    val vpad = when (st.density) {
+        0 -> 4.dp
+        2 -> 12.dp
+        else -> 8.dp
+    }
+    val thumb = when (st.thumbSize) {
+        0 -> 36.dp
+        2 -> 56.dp
+        else -> 44.dp
+    }
+    val count by produceState<Int?>(
+        if (item.isDir) Counts.peek(item) else null,
+        item.path, item.modified
+    ) {
+        if (item.isDir && value == null) value = Counts.count(item)
+    }
+    val sub = remember(item, count, st.showSizes, st.showDates, st.binaryUnits, st.dateStyle) {
+        val parts = ArrayList<String>(2)
+        if (st.showSizes) {
+            parts.add(
+                if (item.isDir) (count?.let { "$it items" } ?: "Folder")
+                else formatSize(item.size, st.binaryUnits)
+            )
+        }
+        if (st.showDates) parts.add(formatDate(item.modified, st.dateStyle))
+        parts.joinToString("  ·  ")
+    }
     val bg = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
     Row(
         Modifier
             .fillMaxWidth()
             .background(bg)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = vpad),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        FileThumb(item, selected, 44.dp)
+        FileThumb(item, selected, thumb)
         Spacer(Modifier.width(16.dp))
         Column(Modifier.weight(1f)) {
             Text(
@@ -861,12 +1060,13 @@ private fun FileRow(
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyLarge
             )
-            val sub = if (item.isDir) "${item.childCount} items" else formatSize(item.size)
-            Text(
-                "$sub  ·  ${formatDate(item.modified)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (sub.isNotEmpty()) {
+                Text(
+                    sub,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             if (showPath) {
                 Text(
                     item.file.parent ?: "",
@@ -888,6 +1088,12 @@ private fun FileCell(
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
+    val st = LocalSettings.current
+    val thumb = when (st.thumbSize) {
+        0 -> 72.dp
+        2 -> 112.dp
+        else -> 88.dp
+    }
     val bg = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent
     Column(
         Modifier
@@ -897,7 +1103,7 @@ private fun FileCell(
             .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        FileThumb(item, selected, 88.dp)
+        FileThumb(item, selected, thumb)
         Spacer(Modifier.height(4.dp))
         Text(
             item.name,

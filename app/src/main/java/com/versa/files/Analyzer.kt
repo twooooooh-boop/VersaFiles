@@ -27,7 +27,7 @@ object Analyzer {
             sizes[kind.ordinal] += len
             val smallest = heap.peek()?.size ?: 0L
             if (heap.size < 50 || len > smallest) {
-                heap.add(toItem(f, false))
+                heap.add(toItem(f))
                 if (heap.size > 50) heap.poll()
             }
             if (count % 500L == 0L) onProgress(count)

@@ -22,13 +22,13 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK
+      - name: Build release APK
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleRelease --no-daemon
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk VersaFiles-build-${{ github.run_number }}.apk
+        run: cp app/build/outputs/apk/release/app-release.apk VersaFiles-build-${{ github.run_number }}.apk
 
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
@@ -42,5 +42,5 @@ jobs:
           tag_name: build-${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           name: VersaFiles build ${{ github.run_number }}
-          body: Automatic debug build from commit ${{ github.sha }}
+          body: Release build (optimized, signed) from commit ${{ github.sha }}
           files: VersaFiles-build-${{ github.run_number }}.apk

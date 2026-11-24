@@ -10,6 +10,7 @@ import android.graphics.drawable.Drawable
 import android.graphics.pdf.PdfRenderer
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.LruCache
 import androidx.compose.foundation.Image
@@ -25,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,11 +38,15 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.concurrent.thread
 
 object Thumbs {
     private val cache = object : LruCache<String, Bitmap>(
@@ -50,27 +56,95 @@ object Thumbs {
     }
     private val failed: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val gate = Semaphore(4)
+    private val heavyGate = Semaphore(2)
+    private var diskDir: File? = null
+
+    @Suppress("DEPRECATION")
+    private val webp: Bitmap.CompressFormat =
+        if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY
+        else Bitmap.CompressFormat.WEBP
+
+    fun init(context: Context) {
+        if (diskDir != null) return
+        val dir = File(context.cacheDir, "thumbs")
+        dir.mkdirs()
+        diskDir = dir
+        thread(isDaemon = true) { prune(dir) }
+    }
+
+    private fun prune(dir: File) {
+        try {
+            val files = dir.listFiles() ?: return
+            var total = files.sumOf { it.length() }
+            val limit = 150L * 1024 * 1024
+            if (total <= limit) return
+            for (f in files.sortedBy { it.lastModified() }) {
+                if (total <= limit * 2 / 3) break
+                total -= f.length()
+                f.delete()
+            }
+        } catch (e: Throwable) {
+            // ignore
+        }
+    }
+
+    fun clear() {
+        cache.evictAll()
+        failed.clear()
+        diskDir?.listFiles()?.forEach { it.delete() }
+    }
 
     fun supports(kind: FileKind): Boolean =
         kind == FileKind.IMAGE || kind == FileKind.VIDEO || kind == FileKind.AUDIO ||
             kind == FileKind.APK || kind == FileKind.PDF
 
-    private fun key(file: File, px: Int) = "${file.absolutePath}|${file.lastModified()}|$px"
+    private fun key(item: FileItem, px: Int) = "${item.path}|${item.modified}|$px"
 
-    fun peek(file: File, px: Int): Bitmap? = cache.get(key(file, px))
+    fun peek(item: FileItem, px: Int): Bitmap? = cache.get(key(item, px))
 
-    suspend fun load(context: Context, file: File, kind: FileKind, px: Int): Bitmap? {
-        val k = key(file, px)
+    private fun diskFile(k: String): File? {
+        val dir = diskDir ?: return null
+        val md = MessageDigest.getInstance("MD5").digest(k.toByteArray())
+        return File(dir, md.joinToString("") { "%02x".format(it) } + ".webp")
+    }
+
+    private fun readDisk(k: String): Bitmap? {
+        val f = diskFile(k) ?: return null
+        return if (f.exists()) BitmapFactory.decodeFile(f.absolutePath) else null
+    }
+
+    private fun writeDisk(k: String, bmp: Bitmap) {
+        try {
+            val f = diskFile(k) ?: return
+            FileOutputStream(f).use { bmp.compress(webp, 80, it) }
+        } catch (e: Throwable) {
+            // ignore
+        }
+    }
+
+    suspend fun load(context: Context, item: FileItem, px: Int): Bitmap? {
+        val k = key(item, px)
         cache.get(k)?.let { return it }
         if (failed.contains(k)) return null
-        return gate.withPermit {
-            withContext(Dispatchers.IO) {
+        return withContext(Dispatchers.IO) {
+            val cached = readDisk(k)
+            if (cached != null) {
+                cache.put(k, cached)
+                return@withContext cached
+            }
+            val g = if (item.kind == FileKind.VIDEO || item.kind == FileKind.PDF) heavyGate else gate
+            g.withPermit {
                 val bmp = try {
-                    create(context, file, kind, px)
+                    create(context, item.file, item.kind, px)
                 } catch (e: Throwable) {
                     null
                 }
-                if (bmp != null) cache.put(k, bmp) else failed.add(k)
+                if (bmp != null) {
+                    cache.put(k, bmp)
+                    writeDisk(k, bmp)
+                } else {
+                    failed.add(k)
+                }
                 bmp
             }
         }
@@ -210,6 +284,23 @@ object Thumbs {
     }
 }
 
+/** Lazily counts folder children (only for rows that are actually visible). */
+object Counts {
+    private val cache = LruCache<String, Int>(3000)
+
+    private fun key(item: FileItem) = item.path + "|" + item.modified
+
+    fun peek(item: FileItem): Int? = cache.get(key(item))
+
+    suspend fun count(item: FileItem): Int? {
+        val k = key(item)
+        cache.get(k)?.let { return it }
+        val n = withContext(Dispatchers.IO) { item.file.list()?.size }
+        if (n != null) cache.put(k, n)
+        return n
+    }
+}
+
 @Composable
 fun FileIcon(kind: FileKind, size: Dp = 40.dp) {
     val scheme = MaterialTheme.colorScheme
@@ -231,18 +322,24 @@ fun FileIcon(kind: FileKind, size: Dp = 40.dp) {
 fun FileThumb(item: FileItem, selected: Boolean, size: Dp, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val density = LocalDensity.current
+    val showThumbs = LocalSettings.current.showThumbs
     val px = ((with(density) { size.roundToPx() } + 63) / 64) * 64
-    val bitmap by produceState<Bitmap?>(Thumbs.peek(item.file, px), item.path, item.modified, px) {
-        if (value == null && Thumbs.supports(item.kind)) {
-            value = Thumbs.load(context, item.file, item.kind, px)
+    val bitmap by produceState<Bitmap?>(
+        if (showThumbs) Thumbs.peek(item, px) else null,
+        item.path, item.modified, px, showThumbs
+    ) {
+        if (showThumbs && value == null && Thumbs.supports(item.kind)) {
+            delay(30)
+            value = Thumbs.load(context, item, px)
         }
     }
     val shape = RoundedCornerShape(8.dp)
     Box(modifier.size(size), contentAlignment = Alignment.Center) {
         val b = bitmap
         if (b != null) {
+            val image = remember(b) { b.asImageBitmap() }
             Image(
-                bitmap = b.asImageBitmap(),
+                bitmap = image,
                 contentDescription = null,
                 contentScale = if (item.kind == FileKind.APK) ContentScale.Fit else ContentScale.Crop,
                 modifier = Modifier

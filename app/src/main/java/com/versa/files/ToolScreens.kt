@@ -15,10 +15,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -42,6 +44,7 @@ import androidx.compose.ui.unit.dp
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TrashScreen(vm: FileManagerViewModel) {
+    val dateStyle = LocalSettings.current.dateStyle
     var confirmEmpty by remember { mutableStateOf(false) }
     BackHandler { vm.closePage() }
 
@@ -80,7 +83,7 @@ fun TrashScreen(vm: FileManagerViewModel) {
                     .fillMaxSize()
             ) {
                 items(vm.trashEntries, key = { it.folder.absolutePath }) { e ->
-                    val item = remember(e.item) { toItem(e.item, false) }
+                    val item = remember(e.item) { toItem(e.item) }
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -104,7 +107,7 @@ fun TrashScreen(vm: FileManagerViewModel) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
-                                "Deleted ${formatDate(e.deletedAt)}",
+                                "Deleted ${formatDate(e.deletedAt, dateStyle)}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -152,6 +155,7 @@ private fun kindLabel(kind: FileKind): String = when (kind) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AnalyzerScreen(vm: FileManagerViewModel) {
+    val binary = LocalSettings.current.binaryUnits
     BackHandler { vm.closePage() }
 
     Scaffold(
@@ -192,7 +196,7 @@ fun AnalyzerScreen(vm: FileManagerViewModel) {
                     item {
                         Column(Modifier.padding(16.dp)) {
                             Text(
-                                formatSize(result.total),
+                                formatSize(result.total, binary),
                                 style = MaterialTheme.typography.headlineMedium
                             )
                             Text(
@@ -211,7 +215,7 @@ fun AnalyzerScreen(vm: FileManagerViewModel) {
                         ) {
                             Row {
                                 Text(kindLabel(kind), modifier = Modifier.weight(1f))
-                                Text(formatSize(size), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(formatSize(size, binary), color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Spacer(Modifier.height(4.dp))
                             val fraction = if (result.total > 0) size.toFloat() / result.total.toFloat() else 0f
@@ -247,7 +251,113 @@ fun AnalyzerScreen(vm: FileManagerViewModel) {
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            Text(formatSize(f.size))
+                            Text(formatSize(f.size, binary))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DuplicatesScreen(vm: FileManagerViewModel) {
+    val binary = LocalSettings.current.binaryUnits
+    BackHandler { vm.closePage() }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Duplicate finder") },
+                navigationIcon = {
+                    IconButton(onClick = vm::closePage) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    if (!vm.dupScanning && vm.dupGroups.isNotEmpty()) {
+                        TextButton(onClick = vm::autoSelectDuplicates) { Text("Auto-select") }
+                        IconButton(
+                            enabled = vm.dupSelected.isNotEmpty(),
+                            onClick = vm::deleteSelectedDuplicates
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = "Move selected to recycle bin")
+                        }
+                    }
+                    IconButton(onClick = vm::startDuplicateScan) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Rescan")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Box(
+            Modifier
+                .padding(padding)
+                .fillMaxSize()
+        ) {
+            if (vm.dupScanning) {
+                Column(
+                    Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center
+                ) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(12.dp))
+                    Text("Scanning… ${vm.dupProgress} files")
+                    Text(
+                        "Looks for identical files of 64 KB or more",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else if (vm.dupGroups.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No duplicates found", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                LazyColumn(Modifier.fillMaxSize()) {
+                    vm.dupGroups.forEach { g ->
+                        item(key = "h:${g.key}") {
+                            Text(
+                                "${g.files.size} copies  ·  ${formatSize(g.size, binary)} each",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp)
+                            )
+                        }
+                        items(g.files, key = { it.absolutePath }) { f ->
+                            val item = remember(f) { toItem(f) }
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { vm.toggleDup(f.absolutePath) }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = f.absolutePath in vm.dupSelected,
+                                    onCheckedChange = { vm.toggleDup(f.absolutePath) }
+                                )
+                                FileThumb(item, false, 44.dp)
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        item.name,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodyLarge
+                                    )
+                                    Text(
+                                        f.parent ?: "",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
                         }
                     }
                 }

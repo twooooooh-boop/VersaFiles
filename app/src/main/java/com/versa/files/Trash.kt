@@ -15,18 +15,22 @@ class TrashManager(private val dir: File) {
         dir.mkdirs()
     }
 
-    fun trash(files: List<File>) {
+    fun trash(files: List<File>): List<TrashEntry> {
+        val out = ArrayList<TrashEntry>()
         files.forEach { f ->
             val folder = File(dir, "${System.currentTimeMillis()}_${(0..9999).random()}")
             folder.mkdirs()
             try {
-                File(folder, ".meta").writeText(f.absolutePath + "\n" + System.currentTimeMillis())
-                FileOps.move(f, folder)
+                val time = System.currentTimeMillis()
+                File(folder, ".meta").writeText(f.absolutePath + "\n" + time)
+                val moved = FileOps.move(f, folder)
+                out.add(TrashEntry(folder, moved, f.absolutePath, time))
             } catch (e: Throwable) {
                 folder.deleteRecursively()
                 throw e
             }
         }
+        return out
     }
 
     fun list(): List<TrashEntry> {

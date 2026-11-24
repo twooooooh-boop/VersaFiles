@@ -8,12 +8,13 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
-import android.provider.Settings
+import android.provider.Settings as AndroidSettings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -25,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,12 +41,15 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 
 class MainActivity : ComponentActivity() {
+    private val vm: FileManagerViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        vm.attach(applicationContext)
         enableEdgeToEdge()
         setContent {
-            VersaTheme {
-                Root()
+            VersaTheme(vm.settings) {
+                Root(vm)
             }
         }
     }
@@ -60,12 +65,15 @@ private fun hasStorageAccess(context: Context): Boolean =
     }
 
 @Composable
-private fun Root() {
+private fun Root(vm: FileManagerViewModel) {
     val context = LocalContext.current
     var granted by remember { mutableStateOf(hasStorageAccess(context)) }
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         granted = hasStorageAccess(context)
+    }
+    LaunchedEffect(granted) {
+        if (granted) vm.onPermissionGranted()
     }
 
     val legacyLauncher = rememberLauncherForActivityResult(
@@ -73,19 +81,19 @@ private fun Root() {
     ) { granted = hasStorageAccess(context) }
 
     if (granted) {
-        FileManagerScreen()
+        FileManagerScreen(vm)
     } else {
         PermissionScreen(onGrant = {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 try {
                     context.startActivity(
                         Intent(
-                            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            AndroidSettings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
                             Uri.parse("package:${context.packageName}")
                         )
                     )
                 } catch (e: Exception) {
-                    context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                    context.startActivity(Intent(AndroidSettings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
                 }
             } else {
                 legacyLauncher.launch(

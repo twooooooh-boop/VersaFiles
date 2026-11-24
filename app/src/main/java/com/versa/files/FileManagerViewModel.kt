@@ -17,11 +17,16 @@ import java.io.File
 
 const val MAX_EDIT_BYTES = 200L * 1024
 
-enum class Page { FILES, TRASH, ANALYZER }
+enum class Page { FILES, TRASH, ANALYZER, DUPLICATES, SETTINGS }
 
 data class PasteBuffer(val files: List<File>, val move: Boolean)
 
-data class UiMessage(val id: Long, val text: String)
+data class UiMessage(
+    val id: Long,
+    val text: String,
+    val actionLabel: String? = null,
+    val action: (() -> Unit)? = null
+)
 
 data class ViewerState(val files: List<File>, val index: Int)
 
@@ -71,18 +76,33 @@ class FileManagerViewModel : ViewModel() {
         private set
     var scannedCount by mutableStateOf(0L)
         private set
+    var settings by mutableStateOf(Settings())
+        private set
+    var recent by mutableStateOf<List<FileItem>>(emptyList())
+        private set
+    var dupGroups by mutableStateOf<List<DupGroup>>(emptyList())
+        private set
+    var dupScanning by mutableStateOf(false)
+        private set
+    var dupProgress by mutableStateOf(0L)
+        private set
+    var dupSelected by mutableStateOf<Set<String>>(emptySet())
+        private set
 
     private var rootPaths: Set<String> = emptySet()
     private var loadJob: Job? = null
     private var analyzerJob: Job? = null
+    private var dupJob: Job? = null
     private var appContext: Context? = null
     private var prefs: Prefs? = null
     private var trash: TrashManager? = null
+    private var lastTrashed: List<TrashEntry> = emptyList()
 
     fun attach(context: Context) {
         if (appContext != null) return
         val app = context.applicationContext
         appContext = app
+        Thumbs.init(app)
         val p = Prefs(app)
         prefs = p
         sortBy = p.sortBy
@@ -90,7 +110,18 @@ class FileManagerViewModel : ViewModel() {
         showHidden = p.showHidden
         viewMode = if (p.gridView) ViewMode.GRID else ViewMode.LIST
         favorites = p.favorites
+        settings = p.loadSettings()
         trash = TrashManager(app.getExternalFilesDir("trash") ?: File(app.filesDir, "trash"))
+        when (settings.startLocation) {
+            StartLocation.INTERNAL -> open(Environment.getExternalStorageDirectory())
+            StartLocation.DOWNLOADS ->
+                open(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS))
+            StartLocation.HOME -> loadRecent()
+        }
+    }
+
+    fun onPermissionGranted() {
+        refresh()
     }
 
     fun setRoots(paths: List<String>) {
@@ -99,8 +130,32 @@ class FileManagerViewModel : ViewModel() {
 
     fun selectedFiles(): List<File> = items.filter { it.path in selected }.map { it.file }
 
-    fun showMessage(text: String) {
-        message = UiMessage(System.nanoTime(), text)
+    fun showMessage(text: String, actionLabel: String? = null, action: (() -> Unit)? = null) {
+        message = UiMessage(System.nanoTime(), text, actionLabel, action)
+    }
+
+    // ---------- settings ----------
+
+    fun updateSettings(refreshList: Boolean = false, transform: (Settings) -> Settings) {
+        val s = transform(settings)
+        settings = s
+        prefs?.saveSettings(s)
+        if (refreshList) refresh()
+    }
+
+    fun resetSettings() {
+        val p = prefs
+        val s = Settings(palette = p?.defaultPalette() ?: 0)
+        settings = s
+        p?.saveSettings(s)
+        refresh()
+    }
+
+    fun clearThumbCache() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { Thumbs.clear() }
+            showMessage("Thumbnail cache cleared")
+        }
     }
 
     // ---------- navigation ----------
@@ -113,7 +168,17 @@ class FileManagerViewModel : ViewModel() {
         query = ""
         searching = false
         items = emptyList()
-        if (dir != null) refresh() else loading = false
+        if (dir != null) {
+            refresh()
+        } else {
+            loading = false
+            loadRecent()
+        }
+    }
+
+    fun goTo(path: String) {
+        val f = File(path.trim())
+        if (f.isDirectory) open(f) else showMessage("Folder not found: $path")
     }
 
     fun openCategory(c: Category) {
@@ -127,15 +192,33 @@ class FileManagerViewModel : ViewModel() {
         refresh()
     }
 
+    fun loadRecent() {
+        val ctx = appContext ?: return
+        val hidden = showHidden
+        viewModelScope.launch {
+            recent = withContext(Dispatchers.IO) {
+                try {
+                    Categories.recent(ctx, 15, hidden)
+                } catch (e: Throwable) {
+                    emptyList()
+                }
+            }
+        }
+    }
+
     fun refresh() {
         val dir = currentDir
         val cat = category
-        if (dir == null && cat == null) return
+        if (dir == null && cat == null) {
+            loadRecent()
+            return
+        }
         loadJob?.cancel()
         val q = query
         val sort = sortBy
         val asc = ascending
         val hidden = showHidden
+        val first = settings.foldersFirst
         val ctx = appContext
         loadJob = viewModelScope.launch {
             loading = true
@@ -146,7 +229,7 @@ class FileManagerViewModel : ViewModel() {
                 } else if (dir == null) {
                     emptyList()
                 } else if (q.isBlank()) {
-                    FileOps.list(dir, hidden, sort, asc)
+                    FileOps.list(dir, hidden, sort, asc, first)
                 } else {
                     FileOps.search(dir, q, hidden) { isActive }
                 }
@@ -199,6 +282,10 @@ class FileManagerViewModel : ViewModel() {
         selected = items.map { it.path }.toSet()
     }
 
+    fun invertSelection() {
+        selected = items.map { it.path }.filter { it !in selected }.toSet()
+    }
+
     fun clearSelection() {
         selected = emptySet()
     }
@@ -215,6 +302,14 @@ class FileManagerViewModel : ViewModel() {
         refresh()
     }
 
+    fun setSortOrder(s: SortBy, asc: Boolean) {
+        sortBy = s
+        ascending = asc
+        prefs?.sortBy = s
+        prefs?.ascending = asc
+        refresh()
+    }
+
     fun toggleHidden() {
         showHidden = !showHidden
         prefs?.showHidden = showHidden
@@ -222,16 +317,20 @@ class FileManagerViewModel : ViewModel() {
     }
 
     fun toggleView() {
-        viewMode = if (viewMode == ViewMode.LIST) ViewMode.GRID else ViewMode.LIST
-        prefs?.gridView = viewMode == ViewMode.GRID
+        setViewMode(if (viewMode == ViewMode.LIST) ViewMode.GRID else ViewMode.LIST)
+    }
+
+    fun setViewMode(mode: ViewMode) {
+        viewMode = mode
+        prefs?.gridView = mode == ViewMode.GRID
     }
 
     // ---------- built-in viewer / editor ----------
 
-    fun openInternally(item: FileItem): Boolean {
+    fun openInternally(item: FileItem, pool: List<FileItem> = items): Boolean {
         when (item.kind) {
             FileKind.IMAGE -> {
-                val images = items.filter { it.kind == FileKind.IMAGE }.map { it.file }
+                val images = pool.filter { it.kind == FileKind.IMAGE }.map { it.file }
                 viewer = ViewerState(images, images.indexOf(item.file).coerceAtLeast(0))
                 return true
             }
@@ -275,14 +374,30 @@ class FileManagerViewModel : ViewModel() {
         clipboard = null
     }
 
-    private fun runTask(label: String, work: () -> String) {
+    private fun runTask(label: String, undoable: Boolean = false, work: () -> String) {
         viewModelScope.launch {
             busy = label
             val result = withContext(Dispatchers.IO) { runCatching { work() } }
             busy = null
-            showMessage(result.getOrElse { "Error: ${it.message ?: it.javaClass.simpleName}" })
+            val text = result.getOrElse { "Error: ${it.message ?: it.javaClass.simpleName}" }
+            if (undoable && result.isSuccess && lastTrashed.isNotEmpty()) {
+                showMessage(text, "Undo") { undoTrash() }
+            } else {
+                showMessage(text)
+            }
             refresh()
             if (page == Page.TRASH) loadTrash()
+        }
+    }
+
+    private fun undoTrash() {
+        val t = trash ?: return
+        val entries = lastTrashed
+        lastTrashed = emptyList()
+        if (entries.isEmpty()) return
+        runTask("Restoring…") {
+            entries.forEach { t.restore(it) }
+            "Restored ${entries.size} item(s)"
         }
     }
 
@@ -306,8 +421,8 @@ class FileManagerViewModel : ViewModel() {
                 if (failed == 0) "Deleted ${files.size} item(s)" else "Could not delete $failed item(s)"
             }
         } else {
-            runTask("Moving to recycle bin…") {
-                t.trash(files)
+            runTask("Moving to recycle bin…", undoable = true) {
+                lastTrashed = t.trash(files)
                 "Moved ${files.size} item(s) to the recycle bin"
             }
         }
@@ -376,7 +491,13 @@ class FileManagerViewModel : ViewModel() {
     fun closePage() {
         page = Page.FILES
         analyzerJob?.cancel()
+        dupJob?.cancel()
         analyzing = false
+        dupScanning = false
+    }
+
+    fun openSettings() {
+        page = Page.SETTINGS
     }
 
     fun openTrash() {
@@ -434,6 +555,53 @@ class FileManagerViewModel : ViewModel() {
             }
             analysis = result
             analyzing = false
+        }
+    }
+
+    fun openDuplicates() {
+        page = Page.DUPLICATES
+        startDuplicateScan()
+    }
+
+    fun startDuplicateScan() {
+        dupJob?.cancel()
+        dupScanning = true
+        dupProgress = 0L
+        dupSelected = emptySet()
+        dupGroups = emptyList()
+        dupJob = viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                Duplicates.scan(
+                    Environment.getExternalStorageDirectory(),
+                    { n -> dupProgress = n },
+                    { isActive }
+                )
+            }
+            dupGroups = result
+            dupScanning = false
+        }
+    }
+
+    fun toggleDup(path: String) {
+        dupSelected = if (path in dupSelected) dupSelected - path else dupSelected + path
+    }
+
+    fun autoSelectDuplicates() {
+        dupSelected = dupGroups.flatMap { g -> g.files.drop(1).map { it.absolutePath } }.toSet()
+    }
+
+    fun deleteSelectedDuplicates() {
+        val t = trash ?: return
+        val victims = dupSelected.map { File(it) }
+        if (victims.isEmpty()) return
+        dupSelected = emptySet()
+        runTask("Moving to recycle bin…", undoable = true) {
+            lastTrashed = t.trash(victims)
+            val gone = victims.map { it.absolutePath }.toSet()
+            dupGroups = dupGroups
+                .map { g -> g.copy(files = g.files.filter { it.absolutePath !in gone }) }
+                .filter { it.files.size > 1 }
+            "Moved ${victims.size} duplicate(s) to the recycle bin"
         }
     }
 }
