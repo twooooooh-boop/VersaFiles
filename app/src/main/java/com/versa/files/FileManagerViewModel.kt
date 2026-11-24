@@ -14,10 +14,11 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.CancellationException
 
 const val MAX_EDIT_BYTES = 200L * 1024
 
-enum class Page { FILES, TRASH, ANALYZER, DUPLICATES, SETTINGS }
+enum class Page { FILES, TRASH, ANALYZER, DUPLICATES, APPS, SETTINGS }
 
 data class PasteBuffer(val files: List<File>, val move: Boolean)
 
@@ -52,11 +53,21 @@ class FileManagerViewModel : ViewModel() {
         private set
     var busy by mutableStateOf<String?>(null)
         private set
+    var taskProgress by mutableStateOf<Float?>(null)
+        private set
+    var taskDetail by mutableStateOf("")
+        private set
+    var taskCancellable by mutableStateOf(false)
+        private set
     var loading by mutableStateOf(false)
         private set
     var query by mutableStateOf("")
         private set
     var searching by mutableStateOf(false)
+        private set
+    var searchKinds by mutableStateOf<Set<FileKind>>(emptySet())
+        private set
+    var searchEverywhere by mutableStateOf(false)
         private set
     var message by mutableStateOf<UiMessage?>(null)
         private set
@@ -69,6 +80,10 @@ class FileManagerViewModel : ViewModel() {
     var editing by mutableStateOf<File?>(null)
         private set
     var trashEntries by mutableStateOf<List<TrashEntry>>(emptyList())
+        private set
+    var trashCount by mutableStateOf(0)
+        private set
+    var trashSize by mutableStateOf(0L)
         private set
     var analysis by mutableStateOf<AnalyzerResult?>(null)
         private set
@@ -88,6 +103,17 @@ class FileManagerViewModel : ViewModel() {
         private set
     var dupSelected by mutableStateOf<Set<String>>(emptySet())
         private set
+    var apps by mutableStateOf<List<AppInfo>>(emptyList())
+        private set
+    var appsLoading by mutableStateOf(false)
+        private set
+    var showSystemApps by mutableStateOf(false)
+        private set
+    var appQuery by mutableStateOf("")
+        private set
+
+    val searchActive: Boolean
+        get() = query.isNotBlank() || searchKinds.isNotEmpty()
 
     private var rootPaths: Set<String> = emptySet()
     private var loadJob: Job? = null
@@ -97,6 +123,7 @@ class FileManagerViewModel : ViewModel() {
     private var prefs: Prefs? = null
     private var trash: TrashManager? = null
     private var lastTrashed: List<TrashEntry> = emptyList()
+    private var currentProgress: TaskProgress? = null
 
     fun attach(context: Context) {
         if (appContext != null) return
@@ -111,7 +138,18 @@ class FileManagerViewModel : ViewModel() {
         viewMode = if (p.gridView) ViewMode.GRID else ViewMode.LIST
         favorites = p.favorites
         settings = p.loadSettings()
-        trash = TrashManager(app.getExternalFilesDir("trash") ?: File(app.filesDir, "trash"))
+        val tm = TrashManager(app.getExternalFilesDir("trash") ?: File(app.filesDir, "trash"))
+        trash = tm
+        val days = settings.trashAutoEmptyDays
+        if (days > 0) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    tm.purgeOlderThan(days)
+                } catch (e: Throwable) {
+                    // ignore
+                }
+            }
+        }
         when (settings.startLocation) {
             StartLocation.INTERNAL -> open(Environment.getExternalStorageDirectory())
             StartLocation.DOWNLOADS ->
@@ -167,6 +205,8 @@ class FileManagerViewModel : ViewModel() {
         selected = emptySet()
         query = ""
         searching = false
+        searchKinds = emptySet()
+        searchEverywhere = false
         items = emptyList()
         if (dir != null) {
             refresh()
@@ -188,6 +228,8 @@ class FileManagerViewModel : ViewModel() {
         selected = emptySet()
         query = ""
         searching = false
+        searchKinds = emptySet()
+        searchEverywhere = false
         items = emptyList()
         refresh()
     }
@@ -195,14 +237,18 @@ class FileManagerViewModel : ViewModel() {
     fun loadRecent() {
         val ctx = appContext ?: return
         val hidden = showHidden
+        val t = trash
         viewModelScope.launch {
-            recent = withContext(Dispatchers.IO) {
-                try {
+            val result = withContext(Dispatchers.IO) {
+                val list: List<FileItem> = try {
                     Categories.recent(ctx, 15, hidden)
                 } catch (e: Throwable) {
                     emptyList()
                 }
+                list to (t?.count() ?: 0)
             }
+            recent = result.first
+            trashCount = result.second
         }
     }
 
@@ -215,6 +261,8 @@ class FileManagerViewModel : ViewModel() {
         }
         loadJob?.cancel()
         val q = query
+        val kinds = searchKinds
+        val everywhere = searchEverywhere
         val sort = sortBy
         val asc = ascending
         val hidden = showHidden
@@ -223,15 +271,17 @@ class FileManagerViewModel : ViewModel() {
         loadJob = viewModelScope.launch {
             loading = true
             if (q.isNotBlank()) delay(250)
+            val searchOn = q.isNotBlank() || kinds.isNotEmpty()
             val result: List<FileItem> = withContext(Dispatchers.IO) {
                 if (cat != null) {
                     if (ctx != null) Categories.query(ctx, cat, hidden) else emptyList()
                 } else if (dir == null) {
                     emptyList()
-                } else if (q.isBlank()) {
+                } else if (!searchOn) {
                     FileOps.list(dir, hidden, sort, asc, first)
                 } else {
-                    FileOps.search(dir, q, hidden) { isActive }
+                    val root = if (everywhere) Environment.getExternalStorageDirectory() else dir
+                    FileOps.search(root, q, hidden, kinds) { isActive }
                 }
             }
             items = result
@@ -266,11 +316,23 @@ class FileManagerViewModel : ViewModel() {
     fun closeSearch() {
         searching = false
         query = ""
+        searchKinds = emptySet()
+        searchEverywhere = false
         refresh()
     }
 
     fun updateQuery(q: String) {
         query = q
+        refresh()
+    }
+
+    fun toggleSearchKinds(kinds: Set<FileKind>) {
+        searchKinds = if (kinds.all { it in searchKinds }) searchKinds - kinds else searchKinds + kinds
+        refresh()
+    }
+
+    fun toggleSearchEverywhere() {
+        searchEverywhere = !searchEverywhere
         refresh()
     }
 
@@ -347,6 +409,14 @@ class FileManagerViewModel : ViewModel() {
         viewer = null
     }
 
+    fun deleteFromViewer(file: File) {
+        val v = viewer ?: return
+        val remaining = v.files.filter { it != file }
+        viewer = if (remaining.isEmpty()) null
+        else ViewerState(remaining, v.index.coerceAtMost(remaining.size - 1))
+        delete(listOf(file), permanent = false)
+    }
+
     fun closeEditor() {
         editing = null
         refresh()
@@ -374,13 +444,50 @@ class FileManagerViewModel : ViewModel() {
         clipboard = null
     }
 
-    private fun runTask(label: String, undoable: Boolean = false, work: () -> String) {
+    fun cancelTask() {
+        currentProgress?.cancelled = true
+    }
+
+    private fun runTask(
+        label: String,
+        undoable: Boolean = false,
+        progress: TaskProgress? = null,
+        work: () -> String
+    ) {
         viewModelScope.launch {
             busy = label
+            currentProgress = progress
+            taskProgress = null
+            taskDetail = ""
+            taskCancellable = progress != null
+            val poller = if (progress != null) {
+                launch {
+                    while (isActive) {
+                        val total = progress.total
+                        taskProgress = if (total > 0) {
+                            (progress.done.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+                        } else {
+                            null
+                        }
+                        taskDetail = progress.current
+                        delay(100)
+                    }
+                }
+            } else {
+                null
+            }
             val result = withContext(Dispatchers.IO) { runCatching { work() } }
+            poller?.cancel()
+            currentProgress = null
+            taskCancellable = false
             busy = null
-            val text = result.getOrElse { "Error: ${it.message ?: it.javaClass.simpleName}" }
-            if (undoable && result.isSuccess && lastTrashed.isNotEmpty()) {
+            val err = result.exceptionOrNull()
+            val text = when {
+                err == null -> result.getOrDefault("")
+                err is CancellationException -> "Cancelled"
+                else -> "Error: ${err.message ?: err.javaClass.simpleName}"
+            }
+            if (undoable && err == null && lastTrashed.isNotEmpty()) {
                 showMessage(text, "Undo") { undoTrash() }
             } else {
                 showMessage(text)
@@ -405,25 +512,34 @@ class FileManagerViewModel : ViewModel() {
         val cb = clipboard ?: return
         val dir = currentDir ?: return
         if (cb.move) clipboard = null
-        runTask(if (cb.move) "Moving…" else "Copying…") {
-            cb.files.forEach { if (cb.move) FileOps.move(it, dir) else FileOps.copy(it, dir) }
-            "${if (cb.move) "Moved" else "Copied"} ${cb.files.size} item(s)"
+        val mode = settings.conflictMode
+        val p = TaskProgress()
+        runTask(if (cb.move) "Moving…" else "Copying…", progress = p) {
+            p.total = cb.files.sumOf { FileOps.totalSize(it) }
+            var done = 0
+            var skipped = 0
+            cb.files.forEach {
+                val r = if (cb.move) FileOps.move(it, dir, p, mode) else FileOps.copy(it, dir, p, mode)
+                if (r == null) skipped++ else done++
+            }
+            val verb = if (cb.move) "Moved" else "Copied"
+            if (skipped > 0) "$verb $done item(s), skipped $skipped" else "$verb $done item(s)"
         }
     }
 
     fun delete(files: List<File>, permanent: Boolean) {
         selected = emptySet()
         val t = trash
-        if (permanent || t == null) {
+        if (permanent || t == null || !settings.trashEnabled) {
             runTask("Deleting…") {
                 var failed = 0
                 files.forEach { if (!it.deleteRecursively()) failed++ }
                 if (failed == 0) "Deleted ${files.size} item(s)" else "Could not delete $failed item(s)"
             }
         } else {
-            runTask("Moving to recycle bin…", undoable = true) {
+            runTask("Moving to trash…", undoable = true) {
                 lastTrashed = t.trash(files)
-                "Moved ${files.size} item(s) to the recycle bin"
+                "Moved ${files.size} item(s) to trash"
             }
         }
     }
@@ -433,6 +549,36 @@ class FileManagerViewModel : ViewModel() {
         runTask("Renaming…") {
             FileOps.rename(file, newName)
             "Renamed to ${FileOps.cleanName(newName)}"
+        }
+    }
+
+    fun batchRename(files: List<File>, base: String) {
+        selected = emptySet()
+        runTask("Renaming…") {
+            val b = FileOps.cleanName(base)
+            if (b.isEmpty()) throw IllegalArgumentException("Invalid name")
+            val sorted = files.sortedWith(
+                Comparator<File> { x, y -> naturalCompare(x.name.lowercase(), y.name.lowercase()) }
+            )
+            val width = sorted.size.toString().length
+            val temps = ArrayList<Triple<File, File, Int>>()
+            sorted.forEachIndexed { i, f ->
+                val tmp = File(f.parentFile, ".versa_tmp_${System.nanoTime()}_$i")
+                if (!f.renameTo(tmp)) throw IllegalStateException("Rename failed: ${f.name}")
+                temps.add(Triple(f, tmp, i))
+            }
+            temps.forEach { (orig, tmp, i) ->
+                val dot = orig.name.lastIndexOf('.')
+                val ext = if (orig.isFile && dot > 0) orig.name.substring(dot) else ""
+                val num = (i + 1).toString().padStart(width, '0')
+                val parent = orig.parentFile ?: throw IllegalStateException("No parent folder")
+                val target = FileOps.uniqueFile(parent, "$b $num$ext")
+                if (!tmp.renameTo(target)) {
+                    tmp.renameTo(orig)
+                    throw IllegalStateException("Rename failed: ${orig.name}")
+                }
+            }
+            "Renamed ${files.size} items"
         }
     }
 
@@ -459,10 +605,11 @@ class FileManagerViewModel : ViewModel() {
     fun compress(files: List<File>, name: String, format: ArchiveFormat) {
         val dir = currentDir ?: files.firstOrNull()?.parentFile ?: return
         selected = emptySet()
-        runTask("Compressing…") {
+        val p = TaskProgress()
+        runTask("Compressing…", progress = p) {
             val out = FileOps.uniqueFile(dir, "${FileOps.cleanName(name)}.${format.ext}")
             try {
-                Archiver.compress(files, out, format)
+                Archiver.compress(files, out, format, p)
             } catch (e: Throwable) {
                 out.delete()
                 throw e
@@ -474,10 +621,11 @@ class FileManagerViewModel : ViewModel() {
     fun extract(file: File) {
         val dir = currentDir ?: file.parentFile ?: return
         selected = emptySet()
-        runTask("Extracting…") {
+        val p = TaskProgress()
+        runTask("Extracting…", progress = p) {
             val dest = FileOps.uniqueFile(dir, file.nameWithoutExtension)
             try {
-                Archiver.extract(file, dest)
+                Archiver.extract(file, dest, p)
             } catch (e: Throwable) {
                 dest.deleteRecursively()
                 throw e
@@ -494,6 +642,7 @@ class FileManagerViewModel : ViewModel() {
         dupJob?.cancel()
         analyzing = false
         dupScanning = false
+        loadRecent()
     }
 
     fun openSettings() {
@@ -508,7 +657,13 @@ class FileManagerViewModel : ViewModel() {
     fun loadTrash() {
         val t = trash ?: return
         viewModelScope.launch {
-            trashEntries = withContext(Dispatchers.IO) { t.list() }
+            val r = withContext(Dispatchers.IO) {
+                val list = t.list()
+                list to t.totalSize(list)
+            }
+            trashEntries = r.first
+            trashCount = r.first.size
+            trashSize = r.second
         }
     }
 
@@ -517,6 +672,15 @@ class FileManagerViewModel : ViewModel() {
         runTask("Restoring…") {
             t.restore(e)
             "Restored ${e.item.name}"
+        }
+    }
+
+    fun restoreAllTrash() {
+        val t = trash ?: return
+        val all = trashEntries
+        runTask("Restoring…") {
+            all.forEach { t.restore(it) }
+            "Restored ${all.size} item(s)"
         }
     }
 
@@ -530,9 +694,9 @@ class FileManagerViewModel : ViewModel() {
 
     fun emptyTrash() {
         val t = trash ?: return
-        runTask("Emptying…") {
+        runTask("Emptying trash…") {
             t.emptyAll()
-            "Recycle bin emptied"
+            "Trash emptied"
         }
     }
 
@@ -591,17 +755,77 @@ class FileManagerViewModel : ViewModel() {
     }
 
     fun deleteSelectedDuplicates() {
-        val t = trash ?: return
         val victims = dupSelected.map { File(it) }
         if (victims.isEmpty()) return
         dupSelected = emptySet()
-        runTask("Moving to recycle bin…", undoable = true) {
-            lastTrashed = t.trash(victims)
+        val t = trash
+        val useTrash = settings.trashEnabled && t != null
+        runTask(if (useTrash) "Moving to trash…" else "Deleting…", undoable = useTrash) {
+            if (useTrash && t != null) {
+                lastTrashed = t.trash(victims)
+            } else {
+                victims.forEach { it.deleteRecursively() }
+            }
             val gone = victims.map { it.absolutePath }.toSet()
             dupGroups = dupGroups
                 .map { g -> g.copy(files = g.files.filter { it.absolutePath !in gone }) }
                 .filter { it.files.size > 1 }
-            "Moved ${victims.size} duplicate(s) to the recycle bin"
+            if (useTrash) "Moved ${victims.size} duplicate(s) to trash"
+            else "Deleted ${victims.size} duplicate(s)"
+        }
+    }
+
+    // ---------- apps ----------
+
+    fun openApps() {
+        page = Page.APPS
+        if (apps.isEmpty()) loadApps()
+    }
+
+    fun loadApps() {
+        val ctx = appContext ?: return
+        appsLoading = true
+        viewModelScope.launch {
+            apps = withContext(Dispatchers.IO) {
+                try {
+                    AppsRepo.list(ctx)
+                } catch (e: Throwable) {
+                    emptyList()
+                }
+            }
+            appsLoading = false
+        }
+    }
+
+    fun toggleSystemApps() {
+        showSystemApps = !showSystemApps
+    }
+
+    fun updateAppQuery(q: String) {
+        appQuery = q
+    }
+
+    fun backupApp(app: AppInfo) {
+        val p = TaskProgress()
+        runTask("Extracting APK…", progress = p) {
+            val outDir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                "VersaFiles Apps"
+            )
+            outDir.mkdirs()
+            val safe = (app.label + "_" + app.version).replace(Regex("[^A-Za-z0-9._-]"), "_")
+            val sources = listOf(File(app.apkPath)) + app.splits.map { File(it) }
+            p.total = sources.sumOf { it.length() }
+            if (sources.size == 1) {
+                val target = FileOps.uniqueFile(outDir, "$safe.apk")
+                FileOps.copyFileTo(sources[0], target, p)
+                "Saved ${target.name} to Downloads/VersaFiles Apps"
+            } else {
+                val dir = FileOps.uniqueFile(outDir, safe)
+                dir.mkdirs()
+                sources.forEach { FileOps.copyFileTo(it, File(dir, it.name), p) }
+                "Saved ${sources.size} APK files to Downloads/VersaFiles Apps/${dir.name}"
+            }
         }
     }
 }

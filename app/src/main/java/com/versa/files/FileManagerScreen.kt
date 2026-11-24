@@ -45,7 +45,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
@@ -56,7 +58,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 private sealed interface UiDialog {
-    data class Delete(val files: List<File>) : UiDialog
+    data class Delete(val files: List<File>, val trash: Boolean) : UiDialog
+    data class BatchRename(val files: List<File>) : UiDialog
     data class Rename(val file: File) : UiDialog
     data object NewFolder : UiDialog
     data object NewFile : UiDialog
@@ -107,6 +110,7 @@ fun FileManagerScreen(vm: FileManagerViewModel) {
             Page.TRASH -> TrashScreen(vm)
             Page.ANALYZER -> AnalyzerScreen(vm)
             Page.DUPLICATES -> DuplicatesScreen(vm)
+            Page.APPS -> AppsScreen(vm)
             Page.SETTINGS -> SettingsScreen(vm)
             Page.FILES -> {}
         }
@@ -121,8 +125,10 @@ fun FileManagerScreen(vm: FileManagerViewModel) {
         vm.viewer?.let { s ->
             ImageViewer(
                 state = s,
+                trashEnabled = vm.settings.trashEnabled,
                 onClose = { vm.closeViewer() },
-                onShare = { shareFiles(context, listOf(it)) }
+                onShare = { shareFiles(context, listOf(it)) },
+                onDelete = { vm.deleteFromViewer(it) }
             )
         }
         SnackbarHost(
@@ -139,15 +145,19 @@ fun FileManagerScreen(vm: FileManagerViewModel) {
 private fun FilesContent(vm: FileManagerViewModel) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
     val roots = remember { storageRoots(context) }
     var dialog by remember { mutableStateOf<UiDialog?>(null) }
     var menuOpen by remember { mutableStateOf(false) }
     var moreOpen by remember { mutableStateOf(false) }
     val selectedFiles = remember(vm.selected, vm.items) { vm.selectedFiles() }
+    val selectedSize = remember(vm.selected, vm.items) {
+        vm.items.filter { it.path in vm.selected }.sumOf { it.size }
+    }
     val cat = vm.category
     val inFolder = vm.currentDir != null
     val atHome = !inFolder && cat == null
-    val showPath = cat != null || vm.query.isNotBlank()
+    val showPath = cat != null || vm.searchActive
     val settings = vm.settings
 
     LaunchedEffect(Unit) { vm.setRoots(roots.map { it.dir.absolutePath }) }
@@ -176,7 +186,8 @@ private fun FilesContent(vm: FileManagerViewModel) {
     }
 
     val requestDelete: () -> Unit = {
-        if (settings.confirmDelete) dialog = UiDialog.Delete(selectedFiles)
+        if (!settings.trashEnabled) dialog = UiDialog.Delete(selectedFiles, false)
+        else if (settings.confirmDelete) dialog = UiDialog.Delete(selectedFiles, true)
         else vm.delete(selectedFiles, false)
     }
 
@@ -184,7 +195,17 @@ private fun FilesContent(vm: FileManagerViewModel) {
         topBar = {
             if (vm.selected.isNotEmpty()) {
                 TopAppBar(
-                    title = { Text("${vm.selected.size} selected") },
+                    title = {
+                        Column {
+                            Text("${vm.selected.size} selected")
+                            if (selectedSize > 0) {
+                                Text(
+                                    formatSize(selectedSize, settings.binaryUnits),
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+                    },
                     navigationIcon = {
                         IconButton(onClick = { vm.clearSelection() }) {
                             Icon(Icons.Default.Close, contentDescription = "Clear selection")
@@ -243,6 +264,16 @@ private fun FilesContent(vm: FileManagerViewModel) {
                                         vm.invertSelection()
                                     }
                                 )
+                                if (selectedFiles.size > 1) {
+                                    DropdownMenuItem(
+                                        text = { Text("Batch rename…") },
+                                        leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null) },
+                                        onClick = {
+                                            moreOpen = false
+                                            dialog = UiDialog.BatchRename(selectedFiles)
+                                        }
+                                    )
+                                }
                                 if (single != null && single.isFile) {
                                     DropdownMenuItem(
                                         text = { Text("Open with…") },
@@ -345,6 +376,9 @@ private fun FilesContent(vm: FileManagerViewModel) {
                     },
                     actions = {
                         if (atHome) {
+                            IconButton(onClick = { vm.openTrash() }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Trash")
+                            }
                             IconButton(onClick = { vm.openSettings() }) {
                                 Icon(Icons.Default.Settings, contentDescription = "Settings")
                             }
@@ -463,6 +497,9 @@ private fun FilesContent(vm: FileManagerViewModel) {
                         Breadcrumbs(dir, roots) { vm.open(it) }
                         HorizontalDivider()
                     }
+                    if (vm.searching) {
+                        SearchFilters(vm)
+                    }
                     if (vm.items.isEmpty()) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             if (vm.loading) {
@@ -470,7 +507,7 @@ private fun FilesContent(vm: FileManagerViewModel) {
                             } else {
                                 Text(
                                     when {
-                                        vm.query.isNotBlank() -> "No results"
+                                        vm.searchActive -> "No results"
                                         cat != null -> "Nothing found"
                                         else -> "This folder is empty"
                                     },
@@ -486,7 +523,10 @@ private fun FilesContent(vm: FileManagerViewModel) {
                                     selected = item.path in vm.selected,
                                     showPath = showPath,
                                     onClick = { onItemClick(item) },
-                                    onLongClick = { vm.toggleSelect(item.path) }
+                                    onLongClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        vm.toggleSelect(item.path)
+                                    }
                                 )
                             }
                         }
@@ -506,14 +546,19 @@ private fun FilesContent(vm: FileManagerViewModel) {
                                     item = item,
                                     selected = item.path in vm.selected,
                                     onClick = { onItemClick(item) },
-                                    onLongClick = { vm.toggleSelect(item.path) }
+                                    onLongClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        vm.toggleSelect(item.path)
+                                    }
                                 )
                             }
                         }
                     }
                 }
             }
-            vm.busy?.let { BusyOverlay(it) }
+            vm.busy?.let {
+                BusyOverlay(it, vm.taskProgress, vm.taskDetail, vm.taskCancellable) { vm.cancelTask() }
+            }
         }
     }
 
@@ -521,21 +566,43 @@ private fun FilesContent(vm: FileManagerViewModel) {
         null -> {}
         is UiDialog.Delete -> AlertDialog(
             onDismissRequest = { dialog = null },
-            title = { Text("Delete") },
-            text = { Text("Delete ${d.files.size} item(s)? They go to the recycle bin unless you delete them permanently.") },
+            title = { Text(if (d.trash) "Move to trash" else "Delete permanently") },
+            text = {
+                Text(
+                    if (d.trash) "Move ${d.files.size} item(s) to trash? You can restore them later."
+                    else "Permanently delete ${d.files.size} item(s)? Trash is turned off, so this can't be undone."
+                )
+            },
             confirmButton = {
                 Row {
-                    TextButton(onClick = {
-                        vm.delete(d.files, true)
-                        dialog = null
-                    }) { Text("Permanently") }
-                    TextButton(onClick = {
-                        vm.delete(d.files, false)
-                        dialog = null
-                    }) { Text("Recycle bin") }
+                    if (d.trash) {
+                        TextButton(onClick = {
+                            vm.delete(d.files, true)
+                            dialog = null
+                        }) { Text("Delete forever") }
+                        TextButton(onClick = {
+                            vm.delete(d.files, false)
+                            dialog = null
+                        }) { Text("Move to trash") }
+                    } else {
+                        TextButton(onClick = {
+                            vm.delete(d.files, true)
+                            dialog = null
+                        }) { Text("Delete") }
+                    }
                 }
             },
             dismissButton = { TextButton(onClick = { dialog = null }) { Text("Cancel") } }
+        )
+        is UiDialog.BatchRename -> TextInputDialog(
+            title = "Batch rename ${d.files.size} items",
+            initial = "File",
+            confirm = "Rename",
+            onConfirm = {
+                vm.batchRename(d.files, it)
+                dialog = null
+            },
+            onDismiss = { dialog = null }
         )
         is UiDialog.Rename -> TextInputDialog(
             title = "Rename",
@@ -740,7 +807,13 @@ private fun InfoLine(label: String, value: String, onClick: (() -> Unit)? = null
 }
 
 @Composable
-private fun BusyOverlay(text: String) {
+private fun BusyOverlay(
+    text: String,
+    progress: Float?,
+    detail: String,
+    cancellable: Boolean,
+    onCancel: () -> Unit
+) {
     Box(
         Modifier
             .fillMaxSize()
@@ -751,15 +824,70 @@ private fun BusyOverlay(text: String) {
             ) {},
         contentAlignment = Alignment.Center
     ) {
-        Card {
+        Card(Modifier.padding(32.dp)) {
             Column(
-                Modifier.padding(24.dp),
+                Modifier
+                    .padding(24.dp)
+                    .fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                CircularProgressIndicator()
-                Spacer(Modifier.height(12.dp))
-                Text(text)
+                Text(text, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(16.dp))
+                if (progress != null) {
+                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(8.dp))
+                    Text("${(progress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    CircularProgressIndicator()
+                }
+                if (detail.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        detail,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (cancellable) {
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = onCancel) { Text("Cancel") }
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun SearchFilters(vm: FileManagerViewModel) {
+    val groups = listOf(
+        "Images" to setOf(FileKind.IMAGE),
+        "Videos" to setOf(FileKind.VIDEO),
+        "Audio" to setOf(FileKind.AUDIO),
+        "Docs" to setOf(FileKind.TEXT, FileKind.PDF),
+        "Archives" to setOf(FileKind.ARCHIVE),
+        "APKs" to setOf(FileKind.APK),
+        "Folders" to setOf(FileKind.FOLDER)
+    )
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        FilterChip(
+            selected = vm.searchEverywhere,
+            onClick = { vm.toggleSearchEverywhere() },
+            label = { Text("Everywhere") }
+        )
+        groups.forEach { (label, kinds) ->
+            FilterChip(
+                selected = kinds.all { it in vm.searchKinds },
+                onClick = { vm.toggleSearchKinds(kinds) },
+                label = { Text(label) }
+            )
         }
     }
 }
@@ -997,7 +1125,13 @@ private fun HomeContent(
             }
         }
         item { SectionTitle("Tools") }
-        item { ToolRow(Icons.Default.Delete, "Recycle bin") { vm.openTrash() } }
+        item {
+            ToolRow(
+                Icons.Default.Delete,
+                if (vm.trashCount > 0) "Trash (${vm.trashCount})" else "Trash"
+            ) { vm.openTrash() }
+        }
+        item { ToolRow(Icons.Default.Android, "Apps") { vm.openApps() } }
         item { ToolRow(Icons.Default.PieChart, "Storage analyzer") { vm.openAnalyzer() } }
         item { ToolRow(Icons.Default.ContentCopy, "Duplicate finder") { vm.openDuplicates() } }
         item { ToolRow(Icons.Default.Settings, "Settings") { vm.openSettings() } }

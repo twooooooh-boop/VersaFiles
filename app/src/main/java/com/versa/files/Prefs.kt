@@ -79,7 +79,10 @@ class Prefs(context: Context) {
         showCategories = sp.getBoolean("s_cats", true),
         showRecent = sp.getBoolean("s_recent", true),
         showQuickAccess = sp.getBoolean("s_quick", true),
-        editorFontSize = sp.getInt("s_editorfont", 14)
+        editorFontSize = sp.getInt("s_editorfont", 14),
+        trashEnabled = sp.getBoolean("s_trash", true),
+        trashAutoEmptyDays = sp.getInt("s_trashdays", 30),
+        conflictMode = sp.getInt("s_conflict", 0)
     )
 
     fun saveSettings(s: Settings) {
@@ -103,6 +106,9 @@ class Prefs(context: Context) {
             .putBoolean("s_recent", s.showRecent)
             .putBoolean("s_quick", s.showQuickAccess)
             .putInt("s_editorfont", s.editorFontSize)
+            .putBoolean("s_trash", s.trashEnabled)
+            .putInt("s_trashdays", s.trashAutoEmptyDays)
+            .putInt("s_conflict", s.conflictMode)
             .apply()
     }
 }

@@ -56,7 +56,12 @@ private fun LabelText(text: String) {
 }
 
 @Composable
-private fun ChipRow(options: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+private fun ChipRow(
+    options: List<String>,
+    selected: Int,
+    enabled: Boolean = true,
+    onSelect: (Int) -> Unit
+) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -68,6 +73,7 @@ private fun ChipRow(options: List<String>, selected: Int, onSelect: (Int) -> Uni
             FilterChip(
                 selected = i == selected,
                 onClick = { onSelect(i) },
+                enabled = enabled,
                 label = { Text(label) }
             )
         }
@@ -292,7 +298,7 @@ fun SettingsScreen(vm: FileManagerViewModel) {
             SectionTitle("Behavior")
             SwitchRow(
                 "Ask before deleting",
-                "When off, deleted items go straight to the recycle bin",
+                "When off, deleted items go straight to trash",
                 s.confirmDelete
             ) { v -> vm.updateSettings { it.copy(confirmDelete = v) } }
             LabelText("Text editor font size: ${s.editorFontSize} sp")
@@ -303,6 +309,33 @@ fun SettingsScreen(vm: FileManagerViewModel) {
                 steps = 10,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+
+            SectionTitle("Trash")
+            SwitchRow(
+                "Enable trash",
+                if (s.trashEnabled) "Deleted files go to trash so you can restore them"
+                else "Deleted files are removed permanently",
+                s.trashEnabled
+            ) { v -> vm.updateSettings { it.copy(trashEnabled = v) } }
+            LabelText("Empty trash automatically")
+            val dayOptions = listOf(0, 7, 30, 60)
+            ChipRow(
+                listOf("Never", "After 7 days", "After 30 days", "After 60 days"),
+                dayOptions.indexOf(s.trashAutoEmptyDays).coerceAtLeast(0),
+                enabled = s.trashEnabled
+            ) { i -> vm.updateSettings { it.copy(trashAutoEmptyDays = dayOptions[i]) } }
+            OutlinedButton(
+                onClick = { vm.openTrash() },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) { Text("Open trash") }
+
+            SectionTitle("File operations")
+            LabelText("If a file already exists")
+            ChipRow(listOf("Keep both", "Replace", "Skip"), s.conflictMode) { i ->
+                vm.updateSettings { it.copy(conflictMode = i) }
+            }
 
             SectionTitle("Maintenance")
             OutlinedButton(
@@ -320,7 +353,7 @@ fun SettingsScreen(vm: FileManagerViewModel) {
 
             SectionTitle("About")
             Text(
-                "VersaFiles 1.2",
+                "VersaFiles 1.3",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 16.dp, bottom = 32.dp)

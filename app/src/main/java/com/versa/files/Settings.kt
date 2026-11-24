@@ -52,5 +52,8 @@ data class Settings(
     val showCategories: Boolean = true,
     val showRecent: Boolean = true,
     val showQuickAccess: Boolean = true,
-    val editorFontSize: Int = 14
+    val editorFontSize: Int = 14,
+    val trashEnabled: Boolean = true,
+    val trashAutoEmptyDays: Int = 30,
+    val conflictMode: Int = 0
 )

@@ -59,11 +59,12 @@ object FileOps {
         root: File,
         query: String,
         showHidden: Boolean,
+        kinds: Set<FileKind>,
         limit: Int = 500,
         active: () -> Boolean = { true }
     ): List<FileItem> {
         val q = query.trim().lowercase()
-        if (q.isEmpty()) return emptyList()
+        if (q.isEmpty() && kinds.isEmpty()) return emptyList()
         val out = ArrayList<FileItem>()
         root.walkTopDown()
             .maxDepth(12)
@@ -72,10 +73,15 @@ object FileOps {
                 if (!active()) return out
                 if (f == root) return@forEach
                 if (!showHidden && f.name.startsWith(".")) return@forEach
-                if (f.name.lowercase().contains(q)) {
-                    out.add(toItem(f))
-                    if (out.size >= limit) return out
+                val name = f.name.lowercase()
+                if (q.isNotEmpty() && !name.contains(q)) return@forEach
+                if (kinds.isNotEmpty()) {
+                    val k = if (f.isDirectory) FileKind.FOLDER
+                    else kindOfExt(name.substringAfterLast('.', ""))
+                    if (k !in kinds) return@forEach
                 }
+                out.add(toItem(f))
+                if (out.size >= limit) return out
             }
         return out
     }
@@ -101,31 +107,74 @@ object FileOps {
         return c.startsWith(p)
     }
 
-    fun copy(src: File, destDir: File): File {
+    /** mode: 0 = keep both, 1 = replace, 2 = skip (returns null) */
+    private fun resolveTarget(src: File, destDir: File, mode: Int): File? {
+        val t = File(destDir, src.name)
+        if (!t.exists()) return t
+        if (t.canonicalPath == src.canonicalPath) return uniqueFile(destDir, src.name)
+        return when (mode) {
+            1 -> {
+                t.deleteRecursively()
+                t
+            }
+            2 -> null
+            else -> uniqueFile(destDir, src.name)
+        }
+    }
+
+    fun copyFileTo(src: File, target: File, p: TaskProgress?) {
+        p?.current = src.name
+        try {
+            src.inputStream().use { input ->
+                target.outputStream().use { output ->
+                    val buf = ByteArray(128 * 1024)
+                    while (true) {
+                        p?.check()
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        output.write(buf, 0, n)
+                        p?.add(n.toLong())
+                    }
+                }
+            }
+            target.setLastModified(src.lastModified())
+        } catch (e: Throwable) {
+            target.delete()
+            throw e
+        }
+    }
+
+    fun copy(src: File, destDir: File, p: TaskProgress? = null, mode: Int = 0): File? {
         if (src.isDirectory && isInside(destDir, src)) {
             throw IllegalArgumentException("Cannot copy a folder into itself")
         }
-        val target = uniqueFile(destDir, src.name)
+        val target = resolveTarget(src, destDir, mode)
+        if (target == null) {
+            p?.add(totalSize(src))
+            return null
+        }
         if (src.isDirectory) {
             target.mkdirs()
-            src.listFiles()?.forEach { copy(it, target) }
-        } else {
-            src.inputStream().use { input ->
-                target.outputStream().use { output -> input.copyTo(output, 64 * 1024) }
+            try {
+                src.listFiles()?.forEach { copy(it, target, p, 0) }
+            } catch (e: Throwable) {
+                target.deleteRecursively()
+                throw e
             }
-            target.setLastModified(src.lastModified())
+        } else {
+            copyFileTo(src, target, p)
         }
         return target
     }
 
-    fun move(src: File, destDir: File): File {
+    fun move(src: File, destDir: File, p: TaskProgress? = null, mode: Int = 0): File? {
         if (src.parentFile?.canonicalPath == destDir.canonicalPath) return src
         if (src.isDirectory && isInside(destDir, src)) {
             throw IllegalArgumentException("Cannot move a folder into itself")
         }
-        val target = uniqueFile(destDir, src.name)
+        val target = resolveTarget(src, destDir, mode) ?: return null
         if (src.renameTo(target)) return target
-        val copied = copy(src, destDir)
+        val copied = copy(src, destDir, p, 0)
         src.deleteRecursively()
         return copied
     }

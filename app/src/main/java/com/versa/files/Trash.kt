@@ -23,7 +23,7 @@ class TrashManager(private val dir: File) {
             try {
                 val time = System.currentTimeMillis()
                 File(folder, ".meta").writeText(f.absolutePath + "\n" + time)
-                val moved = FileOps.move(f, folder)
+                val moved = FileOps.move(f, folder) ?: File(folder, f.name)
                 out.add(TrashEntry(folder, moved, f.absolutePath, time))
             } catch (e: Throwable) {
                 folder.deleteRecursively()
@@ -32,6 +32,8 @@ class TrashManager(private val dir: File) {
         }
         return out
     }
+
+    fun count(): Int = dir.listFiles()?.count { it.isDirectory } ?: 0
 
     fun list(): List<TrashEntry> {
         val folders = dir.listFiles() ?: return emptyList()
@@ -52,6 +54,8 @@ class TrashManager(private val dir: File) {
             .sortedByDescending { it.deletedAt }
     }
 
+    fun totalSize(entries: List<TrashEntry>): Long = entries.sumOf { FileOps.totalSize(it.item) }
+
     fun restore(e: TrashEntry) {
         val parent = File(e.original).parentFile
             ?: throw IllegalStateException("Invalid original path")
@@ -66,5 +70,11 @@ class TrashManager(private val dir: File) {
 
     fun emptyAll() {
         dir.listFiles()?.forEach { it.deleteRecursively() }
+    }
+
+    fun purgeOlderThan(days: Int) {
+        if (days <= 0) return
+        val cutoff = System.currentTimeMillis() - days * 86_400_000L
+        list().filter { it.deletedAt < cutoff }.forEach { purge(it) }
     }
 }
