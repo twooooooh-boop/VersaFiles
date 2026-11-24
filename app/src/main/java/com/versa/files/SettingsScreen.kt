@@ -233,7 +233,7 @@ fun SettingsScreen(vm: FileManagerViewModel) {
             SectionTitle("File list")
             LabelText("Default view")
             ChipRow(listOf("List", "Grid"), vm.viewMode.ordinal) { i ->
-                vm.setViewMode(ViewMode.entries[i])
+                vm.changeViewMode(ViewMode.entries[i])
             }
             LabelText("Sort by")
             ChipRow(SortBy.entries.map { it.label.replaceFirstChar { c -> c.uppercase() } }, vm.sortBy.ordinal) { i ->

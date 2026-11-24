@@ -317,10 +317,10 @@ class FileManagerViewModel : ViewModel() {
     }
 
     fun toggleView() {
-        setViewMode(if (viewMode == ViewMode.LIST) ViewMode.GRID else ViewMode.LIST)
+        changeViewMode(if (viewMode == ViewMode.LIST) ViewMode.GRID else ViewMode.LIST)
     }
 
-    fun setViewMode(mode: ViewMode) {
+    fun changeViewMode(mode: ViewMode) {
         viewMode = mode
         prefs?.gridView = mode == ViewMode.GRID
     }
