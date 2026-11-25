@@ -1,8 +1,17 @@
 package com.versa.files
 
 import androidx.compose.runtime.Immutable
-import org.apache.commons.compress.archivers.sevenz.SevenZFile
+import net.sf.sevenzipjbinding.ExtractAskMode
+import net.sf.sevenzipjbinding.ExtractOperationResult
+import net.sf.sevenzipjbinding.IArchiveExtractCallback
+import net.sf.sevenzipjbinding.IInArchive
+import net.sf.sevenzipjbinding.ISequentialOutStream
+import net.sf.sevenzipjbinding.PropID
+import net.sf.sevenzipjbinding.SevenZip
+import net.sf.sevenzipjbinding.impl.RandomAccessFileInStream
 import java.io.File
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.util.zip.ZipFile
 
 @Immutable
@@ -13,50 +22,128 @@ data class ArchiveEntryItem(
     val size: Long
 )
 
-/** Lets the user browse the inside of a zip / 7z / love / jar / apk without extracting it. */
+private class RawEntry(val path: String, val isDir: Boolean, val size: Long, val index: Int)
+
+private class SevenExtractCallback(
+    private val targets: Map<Int, File>,
+    private val p: TaskProgress?
+) : IArchiveExtractCallback {
+    private var out: FileOutputStream? = null
+
+    private fun closeOut() {
+        try {
+            out?.close()
+        } catch (e: Exception) {
+            // ignore
+        }
+        out = null
+    }
+
+    override fun getStream(index: Int, extractAskMode: ExtractAskMode?): ISequentialOutStream? {
+        closeOut()
+        if (extractAskMode != ExtractAskMode.EXTRACT) return null
+        val f = targets[index] ?: return null
+        f.parentFile?.mkdirs()
+        val o = FileOutputStream(f)
+        out = o
+        p?.current = f.name
+        return ISequentialOutStream { data ->
+            p?.check()
+            o.write(data)
+            p?.add(data.size.toLong())
+            data.size
+        }
+    }
+
+    override fun prepareOperation(extractAskMode: ExtractAskMode?) {}
+
+    override fun setOperationResult(extractOperationResult: ExtractOperationResult?) {
+        closeOut()
+    }
+
+    override fun setTotal(total: Long) {}
+
+    override fun setCompleted(complete: Long) {}
+}
+
+/**
+ * Lets the user browse the inside of almost any archive without extracting it.
+ * Zip-like files use java.util.zip; everything else (rar, 7z, tar.*, iso, cab, ...) uses 7-Zip-JBinding.
+ */
 class ArchiveSession(private val archive: File) {
-    private val is7z = archive.extension.equals("7z", ignoreCase = true)
+    private var zipMode = true
+    private var raw: List<RawEntry> = emptyList()
     private var entries: List<ArchiveEntryItem> = emptyList()
 
     private fun clean(name: String): String = name.replace('\\', '/').trimEnd('/')
 
-    private fun make(name: String, isDir: Boolean, size: Long): ArchiveEntryItem? {
-        val path = clean(name)
-        if (path.isEmpty()) return null
-        return ArchiveEntryItem(
-            path = path,
-            name = path.substringAfterLast('/'),
-            isDir = isDir || name.endsWith("/"),
-            size = if (size > 0) size else 0L
-        )
+    private fun <T> openSeven(block: (IInArchive) -> T): T {
+        val raf = RandomAccessFile(archive, "r")
+        var arc: IInArchive? = null
+        try {
+            arc = SevenZip.openInArchive(null, RandomAccessFileInStream(raf))
+            return block(arc)
+        } finally {
+            try {
+                arc?.close()
+            } catch (e: Exception) {
+                // ignore
+            }
+            try {
+                raf.close()
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
     }
 
     fun load() {
-        val raw = ArrayList<ArchiveEntryItem>()
-        if (is7z) {
-            SevenZFile.builder().setFile(archive).get().use { sz ->
-                for (e in sz.entries) {
-                    make(e.name, e.isDirectory, e.size)?.let { raw.add(it) }
+        val list = ArrayList<RawEntry>()
+        var loaded = false
+        try {
+            ZipFile(archive).use { zf ->
+                var i = 0
+                zf.entries().asSequence().forEach { e ->
+                    val path = clean(e.name)
+                    if (path.isNotEmpty()) {
+                        list.add(RawEntry(path, e.isDirectory || e.name.endsWith("/"), if (e.size > 0) e.size else 0L, i))
+                    }
+                    i++
                 }
             }
-        } else {
-            ZipFile(archive).use { zf ->
-                zf.entries().asSequence().forEach { e ->
-                    make(e.name, e.isDirectory, e.size)?.let { raw.add(it) }
+            zipMode = true
+            loaded = true
+        } catch (e: Exception) {
+            list.clear()
+        }
+        if (!loaded) {
+            zipMode = false
+            openSeven { arc ->
+                for (i in 0 until arc.numberOfItems) {
+                    val rawPath = (arc.getProperty(i, PropID.PATH) as? String) ?: archive.nameWithoutExtension
+                    val path = clean(rawPath)
+                    if (path.isEmpty()) continue
+                    val isDir = (arc.getProperty(i, PropID.IS_FOLDER) as? Boolean) ?: false
+                    val size = (arc.getProperty(i, PropID.SIZE) as? Long) ?: 0L
+                    list.add(RawEntry(path, isDir, if (size > 0) size else 0L, i))
                 }
             }
         }
+        raw = list
+        val items = ArrayList<ArchiveEntryItem>()
         val dirs = HashSet<String>()
-        raw.filter { it.isDir }.forEach { dirs.add(it.path) }
-        val extra = ArrayList<ArchiveEntryItem>()
-        for (r in raw) {
+        for (r in list) {
+            items.add(ArchiveEntryItem(r.path, r.path.substringAfterLast('/'), r.isDir, r.size))
+            if (r.isDir) dirs.add(r.path)
+        }
+        for (r in list) {
             var p = r.path.substringBeforeLast('/', "")
             while (p.isNotEmpty() && dirs.add(p)) {
-                extra.add(ArchiveEntryItem(p, p.substringAfterLast('/'), true, 0L))
+                items.add(ArchiveEntryItem(p, p.substringAfterLast('/'), true, 0L))
                 p = p.substringBeforeLast('/', "")
             }
         }
-        entries = raw + extra
+        entries = items
     }
 
     /** prefix is "" for the root, or a folder path that ends with "/". */
@@ -89,54 +176,22 @@ class ArchiveSession(private val archive: File) {
         fun wanted(path: String): Boolean =
             selected == null || selected.any { path == it || path.startsWith("$it/") }
 
-        if (is7z) {
-            SevenZFile.builder().setFile(archive).get().use { sz ->
-                p?.total = sz.entries
-                    .filter { !it.isDirectory && wanted(clean(it.name)) }
-                    .sumOf { if (it.size > 0) it.size else 0L }
-                val buf = ByteArray(64 * 1024)
-                var e = sz.nextEntry
-                while (e != null) {
-                    p?.check()
-                    val path = clean(e.name)
-                    if (path.isNotEmpty() && wanted(path)) {
-                        val rel = path.removePrefix(basePrefix)
-                        if (rel.isNotEmpty()) {
-                            val target = Archiver.safeTarget(dest, rel)
-                            if (e.isDirectory) {
-                                target.mkdirs()
-                            } else {
-                                p?.current = target.name
-                                target.parentFile?.mkdirs()
-                                target.outputStream().use { out ->
-                                    while (true) {
-                                        p?.check()
-                                        val n = sz.read(buf)
-                                        if (n < 0) break
-                                        out.write(buf, 0, n)
-                                        p?.add(n.toLong())
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    e = sz.nextEntry
-                }
-            }
-        } else {
+        val chosen = raw.filter { wanted(it.path) }
+        p?.total = chosen.filter { !it.isDir }.sumOf { it.size }
+
+        if (zipMode) {
             ZipFile(archive).use { zf ->
-                val list = zf.entries().asSequence().filter { wanted(clean(it.name)) }.toList()
-                p?.total = list.filter { !it.isDirectory }.sumOf { if (it.size > 0) it.size else 0L }
+                val byIndex = zf.entries().asSequence().toList()
                 val buf = ByteArray(64 * 1024)
-                for (e in list) {
+                for (r in chosen) {
                     p?.check()
-                    val path = clean(e.name)
-                    val rel = path.removePrefix(basePrefix)
+                    val rel = r.path.removePrefix(basePrefix)
                     if (rel.isEmpty()) continue
                     val target = Archiver.safeTarget(dest, rel)
-                    if (e.isDirectory || e.name.endsWith("/")) {
+                    if (r.isDir) {
                         target.mkdirs()
                     } else {
+                        val e = byIndex.getOrNull(r.index) ?: continue
                         p?.current = target.name
                         target.parentFile?.mkdirs()
                         zf.getInputStream(e).use { input ->
@@ -151,6 +206,25 @@ class ArchiveSession(private val archive: File) {
                             }
                         }
                     }
+                }
+            }
+        } else {
+            val targets = HashMap<Int, File>()
+            val indices = ArrayList<Int>()
+            for (r in chosen) {
+                val rel = r.path.removePrefix(basePrefix)
+                if (rel.isEmpty()) continue
+                val target = Archiver.safeTarget(dest, rel)
+                if (r.isDir) {
+                    target.mkdirs()
+                } else {
+                    targets[r.index] = target
+                    indices.add(r.index)
+                }
+            }
+            if (indices.isNotEmpty()) {
+                openSeven { arc ->
+                    arc.extract(indices.toIntArray(), false, SevenExtractCallback(targets, p))
                 }
             }
         }

@@ -164,6 +164,18 @@ fun FileManagerScreen(vm0: FileManagerViewModel, tabs: TabsViewModel) {
         active.pdfFile?.let { f ->
             PdfViewerScreen(f) { active.closePdf() }
         }
+        active.hexFile?.let { f -> HexViewerScreen(f) { active.closeHex() } }
+        active.bigText?.let { f -> LargeTextScreen(f) { active.closeBigText() } }
+        active.webFile?.let { f -> WebViewerScreen(f) { active.closeWeb() } }
+        active.dbFile?.let { f -> SqliteViewerScreen(f) { active.closeDb() } }
+        active.docFile?.let { f -> DocViewerScreen(f) { active.closeDoc() } }
+        active.openRequest?.let { r ->
+            OpenWithDialog(
+                request = r,
+                onDismiss = { active.dismissOpenRequest() },
+                onChoose = { t, always -> active.chooseTarget(t, always) }
+            )
+        }
         active.playing?.let { f ->
             MediaPlayerScreen(
                 file = f,
@@ -290,10 +302,7 @@ private fun FilesContent(vm: FileManagerViewModel, tabs: TabsViewModel) {
             vm.selected.isNotEmpty() -> vm.toggleSelect(item.path)
             item.isDir -> vm.open(item.file)
             item.nameKey.endsWith(".vfenc") -> dialog = UiDialog.Decrypt(item.file)
-            item.kind == FileKind.ARCHIVE && isExtractable(item.file) -> vm.openArchive(item.file)
-            else -> {
-                if (!vm.openInternally(item)) openFile(context, item.file)
-            }
+            else -> vm.openFileFlow(item)
         }
     }
 
@@ -424,7 +433,7 @@ private fun FilesContent(vm: FileManagerViewModel, tabs: TabsViewModel) {
                                         leadingIcon = { Icon(Icons.Default.OpenInNew, contentDescription = null) },
                                         onClick = {
                                             moreOpen = false
-                                            openFile(context, single)
+                                            vm.openFileFlow(toItem(single), forceAsk = true)
                                         }
                                     )
                                 }
@@ -652,7 +661,7 @@ private fun FilesContent(vm: FileManagerViewModel, tabs: TabsViewModel) {
             val dir = vm.currentDir
             if (dir == null && cat == null) {
                 HomeContent(vm, roots) { item ->
-                    if (!vm.openInternally(item, vm.recent)) openFile(context, item.file)
+                    vm.openFileFlow(item, vm.recent)
                 }
             } else {
                 var pulling by remember { mutableStateOf(false) }

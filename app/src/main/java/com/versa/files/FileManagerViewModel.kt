@@ -132,6 +132,18 @@ class FileManagerViewModel : ViewModel() {
         private set
     var shareTarget by mutableStateOf<File?>(null)
         private set
+    var openRequest by mutableStateOf<OpenRequest?>(null)
+        private set
+    var hexFile by mutableStateOf<File?>(null)
+        private set
+    var bigText by mutableStateOf<File?>(null)
+        private set
+    var webFile by mutableStateOf<File?>(null)
+        private set
+    var dbFile by mutableStateOf<File?>(null)
+        private set
+    var docFile by mutableStateOf<File?>(null)
+        private set
 
     // shared between all tabs
     var settings: Settings
@@ -184,6 +196,7 @@ class FileManagerViewModel : ViewModel() {
             SharedState.loaded = true
             settings = p.loadSettings()
             favorites = p.favorites
+            SharedState.defaults = p.openDefaults
         }
         val tm = TrashManager(app.getExternalFilesDir("trash") ?: File(app.filesDir, "trash"))
         trash = tm
@@ -460,28 +473,99 @@ class FileManagerViewModel : ViewModel() {
 
     // ---------- built-in viewers ----------
 
-    fun openInternally(item: FileItem, pool: List<FileItem> = items): Boolean {
-        when (item.kind) {
-            FileKind.IMAGE -> {
-                val images = pool.filter { it.kind == FileKind.IMAGE }.map { it.file }
-                viewer = ViewerState(images, images.indexOf(item.file).coerceAtLeast(0))
-                return true
+    /** Starts "open a file": uses the saved ALWAYS choice, or shows the Open with list. */
+    fun openFileFlow(item: FileItem, pool: List<FileItem> = items, forceAsk: Boolean = false) {
+        val ctx = appContext ?: return
+        val raw = item.nameKey.substringAfterLast('.', "")
+        val key = if (raw.isEmpty()) "(none)" else raw
+        viewModelScope.launch {
+            val targets = withContext(Dispatchers.IO) { OpenWith.targets(ctx, item) }
+            if (!forceAsk) {
+                val saved = SharedState.defaults[key]
+                val savedTarget = if (saved != null) targets.firstOrNull { it.id == saved } else null
+                if (savedTarget != null) {
+                    launchTarget(savedTarget, item, pool)
+                    return@launch
+                }
+                if (!settings.askOpenWith) {
+                    targets.firstOrNull()?.let { launchTarget(it, item, pool) }
+                    return@launch
+                }
             }
-            FileKind.TEXT -> {
-                if (item.size > MAX_EDIT_BYTES) return false
-                editing = item.file
-                return true
-            }
-            FileKind.VIDEO, FileKind.AUDIO -> {
-                playing = item.file
-                return true
-            }
-            FileKind.PDF -> {
-                pdfFile = item.file
-                return true
-            }
-            else -> return false
+            openRequest = OpenRequest(item, pool, targets, key)
         }
+    }
+
+    fun chooseTarget(t: OpenTarget, always: Boolean) {
+        val r = openRequest ?: return
+        openRequest = null
+        if (always) {
+            val map = SharedState.defaults + (r.key to t.id)
+            SharedState.defaults = map
+            prefs?.openDefaults = map
+            val what = if (r.key == "(none)") "these files" else ".${r.key} files"
+            showMessage("Always open $what with ${t.label}")
+        }
+        launchTarget(t, r.item, r.pool)
+    }
+
+    fun dismissOpenRequest() {
+        openRequest = null
+    }
+
+    fun clearDefault(key: String) {
+        val map = SharedState.defaults - key
+        SharedState.defaults = map
+        prefs?.openDefaults = map
+        showMessage("Default cleared. You will be asked next time")
+    }
+
+    fun clearAllDefaults() {
+        SharedState.defaults = emptyMap()
+        prefs?.openDefaults = emptyMap()
+        showMessage("All default apps cleared")
+    }
+
+    private fun launchTarget(t: OpenTarget, item: FileItem, pool: List<FileItem>) {
+        if (!t.builtin) {
+            appContext?.let { OpenWith.launchExternal(it, item.file, t) }
+            return
+        }
+        when (t.id.removePrefix("b:")) {
+            "image" -> {
+                val images = pool.filter { it.kind == FileKind.IMAGE }.map { it.file }
+                val list = if (item.file in images) images else listOf(item.file)
+                viewer = ViewerState(list, list.indexOf(item.file).coerceAtLeast(0))
+            }
+            "media" -> playing = item.file
+            "pdf" -> pdfFile = item.file
+            "text" -> if (item.size <= MAX_EDIT_BYTES) editing = item.file else bigText = item.file
+            "archive" -> openArchive(item.file)
+            "hex" -> hexFile = item.file
+            "web" -> webFile = item.file
+            "sqlite" -> dbFile = item.file
+            "doc" -> docFile = item.file
+        }
+    }
+
+    fun closeHex() {
+        hexFile = null
+    }
+
+    fun closeBigText() {
+        bigText = null
+    }
+
+    fun closeWeb() {
+        webFile = null
+    }
+
+    fun closeDb() {
+        dbFile = null
+    }
+
+    fun closeDoc() {
+        docFile = null
     }
 
     fun closeViewer() {
@@ -953,7 +1037,7 @@ class FileManagerViewModel : ViewModel() {
                 showMessage("Can't open this file")
             } else {
                 val item = toItem(f)
-                if (!openInternally(item, listOf(item))) openFile(ctx, f)
+                openFileFlow(item, listOf(item))
             }
         }
     }

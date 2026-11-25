@@ -40,6 +40,19 @@ class Prefs(context: Context) {
             sp.edit().putString("favs", value.joinToString("\n")).apply()
         }
 
+    /** "Always open with" choices: file extension -> target id. */
+    var openDefaults: Map<String, String>
+        get() = (sp.getString("open_defaults", "") ?: "").split("\n").mapNotNull { line ->
+            val i = line.indexOf('=')
+            if (i > 0) line.substring(0, i) to line.substring(i + 1) else null
+        }.toMap()
+        set(value) {
+            sp.edit().putString(
+                "open_defaults",
+                value.entries.joinToString("\n") { it.key + "=" + it.value }
+            ).apply()
+        }
+
     private fun themeModeOf(name: String?): ThemeMode = try {
         if (name == null) ThemeMode.SYSTEM else ThemeMode.valueOf(name)
     } catch (e: Exception) {
@@ -82,7 +95,8 @@ class Prefs(context: Context) {
         editorFontSize = sp.getInt("s_editorfont", 14),
         trashEnabled = sp.getBoolean("s_trash", true),
         trashAutoEmptyDays = sp.getInt("s_trashdays", 30),
-        conflictMode = sp.getInt("s_conflict", 0)
+        conflictMode = sp.getInt("s_conflict", 0),
+        askOpenWith = sp.getBoolean("s_askopen", true)
     )
 
     fun saveSettings(s: Settings) {
@@ -109,6 +123,7 @@ class Prefs(context: Context) {
             .putBoolean("s_trash", s.trashEnabled)
             .putInt("s_trashdays", s.trashAutoEmptyDays)
             .putInt("s_conflict", s.conflictMode)
+            .putBoolean("s_askopen", s.askOpenWith)
             .apply()
     }
 }

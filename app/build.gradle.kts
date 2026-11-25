@@ -12,8 +12,8 @@ android {
         applicationId = "com.versa.files"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.4"
+        versionCode = 6
+        versionName = "1.5"
     }
 
     signingConfigs {
@@ -69,4 +69,5 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("org.apache.commons:commons-compress:1.27.1")
     implementation("org.tukaani:xz:1.10")
+    implementation("com.github.omicronapps:7-Zip-JBinding-4Android:Release-16.02-2.02")
 }

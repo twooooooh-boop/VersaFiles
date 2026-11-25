@@ -11,6 +11,7 @@ object SharedState {
     var settings by mutableStateOf(Settings())
     var favorites by mutableStateOf<List<String>>(emptyList())
     var clipboard by mutableStateOf<PasteBuffer?>(null)
+    var defaults by mutableStateOf<Map<String, String>>(emptyMap())
     var loaded = false
     var started = false
 }

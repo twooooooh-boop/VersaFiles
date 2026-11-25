@@ -55,5 +55,6 @@ data class Settings(
     val editorFontSize: Int = 14,
     val trashEnabled: Boolean = true,
     val trashAutoEmptyDays: Int = 30,
-    val conflictMode: Int = 0
+    val conflictMode: Int = 0,
+    val askOpenWith: Boolean = true
 )

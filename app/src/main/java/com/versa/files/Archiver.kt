@@ -1,13 +1,11 @@
 package com.versa.files
 
-import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.zip.ZipEntry
-import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 enum class ArchiveFormat(val label: String, val ext: String) {
@@ -100,12 +98,11 @@ object Archiver {
         }
     }
 
+    /** Extracts any supported archive (zip, 7z, rar, tar.*, iso, cab, ...) into destDir. */
     fun extract(archive: File, destDir: File, p: TaskProgress? = null) {
-        destDir.mkdirs()
-        when (archive.extension.lowercase()) {
-            "7z" -> extractSevenZ(archive, destDir, p)
-            else -> extractZip(archive, destDir, p)
-        }
+        val session = ArchiveSession(archive)
+        session.load()
+        session.extract(null, "", destDir, p)
     }
 
     fun safeTarget(destDir: File, name: String): File {
@@ -114,62 +111,5 @@ object Archiver {
             throw SecurityException("Blocked unsafe path: $name")
         }
         return target
-    }
-
-    private fun extractZip(archive: File, destDir: File, p: TaskProgress?) {
-        ZipFile(archive).use { zf ->
-            val all = zf.entries().asSequence().toList()
-            p?.total = all.sumOf { if (it.size > 0) it.size else 0L }
-            val buf = ByteArray(64 * 1024)
-            for (e in all) {
-                p?.check()
-                val target = safeTarget(destDir, e.name)
-                if (e.isDirectory) {
-                    target.mkdirs()
-                } else {
-                    p?.current = target.name
-                    target.parentFile?.mkdirs()
-                    zf.getInputStream(e).use { input ->
-                        target.outputStream().use { output ->
-                            while (true) {
-                                p?.check()
-                                val n = input.read(buf)
-                                if (n < 0) break
-                                output.write(buf, 0, n)
-                                p?.add(n.toLong())
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private fun extractSevenZ(archive: File, destDir: File, p: TaskProgress?) {
-        SevenZFile.builder().setFile(archive).get().use { sz ->
-            p?.total = sz.entries.sumOf { if (it.size > 0) it.size else 0L }
-            val buf = ByteArray(64 * 1024)
-            var e = sz.nextEntry
-            while (e != null) {
-                p?.check()
-                val target = safeTarget(destDir, e.name)
-                if (e.isDirectory) {
-                    target.mkdirs()
-                } else {
-                    p?.current = target.name
-                    target.parentFile?.mkdirs()
-                    target.outputStream().use { output ->
-                        while (true) {
-                            p?.check()
-                            val n = sz.read(buf)
-                            if (n < 0) break
-                            output.write(buf, 0, n)
-                            p?.add(n.toLong())
-                        }
-                    }
-                }
-                e = sz.nextEntry
-            }
-        }
     }
 }

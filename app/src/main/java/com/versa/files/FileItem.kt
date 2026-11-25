@@ -26,18 +26,29 @@ data class FileItem(
     val kind: FileKind
 )
 
-private val extractableExts = setOf("zip", "7z", "love", "jar")
+/** Everything the archive viewer can open (zip based formats and real archives). */
+val archiveBrowseExts = setOf(
+    "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "tbz2", "tbz", "xz", "txz", "lzma", "z", "iso", "cab",
+    "arj", "lzh", "lha", "cpio", "deb", "rpm", "wim", "swm", "dmg", "vhd", "vhdx", "squashfs", "chm",
+    "zst", "tzst", "xar", "udf", "love", "jar", "aar", "war", "ear", "cbz", "cbr", "cb7", "cbt", "kmz",
+    "xpi", "crx", "apks", "xapk", "apkm", "obb", "apk", "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub"
+)
 
 fun isExtractable(f: File): Boolean =
-    f.isFile && f.extension.lowercase(Locale.ROOT) in extractableExts
+    f.isFile && f.extension.lowercase(Locale.ROOT) in archiveBrowseExts
 
 fun kindOfExt(ext: String): FileKind = when (ext) {
-    "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic" -> FileKind.IMAGE
-    "mp4", "mkv", "webm", "avi", "mov", "3gp" -> FileKind.VIDEO
-    "mp3", "wav", "flac", "ogg", "m4a", "aac", "opus" -> FileKind.AUDIO
-    "zip", "7z", "love", "jar", "rar", "tar", "gz" -> FileKind.ARCHIVE
-    "txt", "md", "json", "xml", "kt", "java", "py", "lua", "html", "css", "js",
-    "log", "csv", "yml", "yaml", "ini", "conf", "sh" -> FileKind.TEXT
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif", "avif", "ico", "wbmp" -> FileKind.IMAGE
+    "mp4", "mkv", "webm", "avi", "mov", "3gp", "m4v", "flv", "wmv", "mpg", "mpeg", "ogv" -> FileKind.VIDEO
+    "mp3", "wav", "flac", "ogg", "m4a", "aac", "opus", "wma", "amr", "mid", "midi", "oga" -> FileKind.AUDIO
+    "zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "tbz2", "tbz", "xz", "txz", "lzma", "z", "iso", "cab",
+    "arj", "lzh", "lha", "cpio", "deb", "rpm", "wim", "swm", "dmg", "vhd", "vhdx", "squashfs", "chm",
+    "zst", "tzst", "xar", "udf", "love", "jar", "aar", "war", "ear", "cbz", "cbr", "cb7", "cbt", "kmz",
+    "xpi", "crx", "apks", "xapk", "apkm", "obb" -> FileKind.ARCHIVE
+    "txt", "md", "json", "xml", "kt", "java", "py", "lua", "html", "htm", "css", "js", "log", "csv", "tsv",
+    "yml", "yaml", "ini", "conf", "sh", "c", "h", "cpp", "hpp", "cs", "go", "rs", "ts", "php", "rb",
+    "swift", "gradle", "kts", "properties", "toml", "sql", "bat", "cmd", "svg", "srt", "vtt", "tex",
+    "docx", "doc", "xlsx", "xls", "pptx", "ppt", "odt", "ods", "odp", "rtf", "epub" -> FileKind.TEXT
     "apk" -> FileKind.APK
     "pdf" -> FileKind.PDF
     else -> FileKind.OTHER

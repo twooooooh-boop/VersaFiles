@@ -34,6 +34,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -310,6 +311,57 @@ fun SettingsScreen(vm: FileManagerViewModel) {
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
 
+            SectionTitle("Opening files")
+            SwitchRow(
+                "Ask which app to use",
+                "Show the Open with list (JUST ONCE / ALWAYS) when you tap a file",
+                s.askOpenWith
+            ) { v ->
+                vm.updateSettings { it.copy(askOpenWith = v) }
+                vm.showMessage(
+                    if (v) "VersaFiles will ask which app to use"
+                    else "Files open with your saved or first choice"
+                )
+            }
+            LabelText("Always-open choices")
+            val defaults = SharedState.defaults
+            if (defaults.isEmpty()) {
+                Text(
+                    "None yet. Choose ALWAYS in the Open with list to set one.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            } else {
+                defaults.entries.sortedBy { it.key }.forEach { entry ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                if (entry.key == "(none)") "Files without extension" else ".${entry.key}",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                OpenWith.describe(entry.value),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TextButton(onClick = { vm.clearDefault(entry.key) }) { Text("Clear") }
+                    }
+                }
+                OutlinedButton(
+                    onClick = { vm.clearAllDefaults() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) { Text("Clear all") }
+            }
+
             SectionTitle("Trash")
             SwitchRow(
                 "Enable trash",
@@ -359,7 +411,7 @@ fun SettingsScreen(vm: FileManagerViewModel) {
 
             SectionTitle("About")
             Text(
-                "VersaFiles 1.4",
+                "VersaFiles 1.5",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 16.dp, bottom = 32.dp)
