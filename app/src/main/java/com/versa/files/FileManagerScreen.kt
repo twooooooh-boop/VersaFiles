@@ -10,6 +10,14 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -60,6 +68,8 @@ import java.io.File
 private sealed interface UiDialog {
     data class Delete(val files: List<File>, val trash: Boolean) : UiDialog
     data class BatchRename(val files: List<File>) : UiDialog
+    data class Encrypt(val files: List<File>) : UiDialog
+    data class Decrypt(val file: File) : UiDialog
     data class Rename(val file: File) : UiDialog
     data object NewFolder : UiDialog
     data object NewFile : UiDialog
@@ -91,11 +101,27 @@ private fun categoryColor(c: Category): Color = when (c) {
 }
 
 @Composable
-fun FileManagerScreen(vm: FileManagerViewModel) {
+fun FileManagerScreen(vm0: FileManagerViewModel, tabs: TabsViewModel) {
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
-    LaunchedEffect(vm.message) {
-        val m = vm.message ?: return@LaunchedEffect
+    val vms = tabs.ids.map { id ->
+        if (id == 0) vm0 else viewModel<FileManagerViewModel>(key = "tab$id")
+    }
+    tabs.ids.forEachIndexed { i, id ->
+        val v = vms[i]
+        remember(v) {
+            v.attach(context, applyStart = false)
+            tabs.consumeStart(id)?.let { v.open(it) }
+            true
+        }
+    }
+    val active = vms.getOrNull(tabs.ids.indexOf(tabs.active)) ?: vm0
+    val multi = tabs.ids.size > 1
+    val shown = remember { HashSet<Long>() }
+
+    LaunchedEffect(active, active.message) {
+        val m = active.message ?: return@LaunchedEffect
+        if (!shown.add(m.id)) return@LaunchedEffect
         val result = snackbar.showSnackbar(
             message = m.text,
             actionLabel = m.actionLabel,
@@ -103,33 +129,62 @@ fun FileManagerScreen(vm: FileManagerViewModel) {
         )
         if (result == SnackbarResult.ActionPerformed) m.action?.invoke()
     }
+    BackHandler(enabled = multi) { tabs.closeTab(tabs.active) }
 
     Box(Modifier.fillMaxSize()) {
-        FilesContent(vm)
-        when (vm.page) {
-            Page.TRASH -> TrashScreen(vm)
-            Page.ANALYZER -> AnalyzerScreen(vm)
-            Page.DUPLICATES -> DuplicatesScreen(vm)
-            Page.APPS -> AppsScreen(vm)
-            Page.SETTINGS -> SettingsScreen(vm)
+        Column(Modifier.fillMaxSize()) {
+            if (multi) TabStrip(tabs, vms)
+            Box(
+                Modifier
+                    .weight(1f)
+                    .then(if (multi) Modifier.consumeWindowInsets(WindowInsets.statusBars) else Modifier)
+            ) {
+                key(tabs.active) { FilesContent(active, tabs) }
+            }
+        }
+        when (active.page) {
+            Page.TRASH -> TrashScreen(active)
+            Page.ANALYZER -> AnalyzerScreen(active)
+            Page.DUPLICATES -> DuplicatesScreen(active)
+            Page.CLEANER -> CleanerScreen(active)
+            Page.APPS -> AppsScreen(active)
+            Page.SHARE -> ShareScreen(active)
+            Page.ARCHIVE -> ArchiveScreen(active)
+            Page.SETTINGS -> SettingsScreen(active)
             Page.FILES -> {}
         }
-        vm.editing?.let { f ->
+        active.editing?.let { f ->
             TextEditor(
                 file = f,
-                fontSize = vm.settings.editorFontSize,
-                onClose = { vm.closeEditor() },
-                onNotify = { vm.showMessage(it) }
+                fontSize = active.settings.editorFontSize,
+                onClose = { active.closeEditor() },
+                onNotify = { active.showMessage(it) }
             )
         }
-        vm.viewer?.let { s ->
+        active.pdfFile?.let { f ->
+            PdfViewerScreen(f) { active.closePdf() }
+        }
+        active.playing?.let { f ->
+            MediaPlayerScreen(
+                file = f,
+                isAudio = kindOfExt(f.extension.lowercase()) == FileKind.AUDIO,
+                onClose = { active.closePlayer() },
+                onFallback = { active.playerFallback(it) }
+            )
+        }
+        active.viewer?.let { s ->
             ImageViewer(
                 state = s,
-                trashEnabled = vm.settings.trashEnabled,
-                onClose = { vm.closeViewer() },
+                trashEnabled = active.settings.trashEnabled,
+                onClose = { active.closeViewer() },
                 onShare = { shareFiles(context, listOf(it)) },
-                onDelete = { vm.deleteFromViewer(it) }
+                onDelete = { active.deleteFromViewer(it) }
             )
+        }
+        active.busy?.let {
+            BusyOverlay(it, active.taskProgress, active.taskDetail, active.taskCancellable) {
+                active.cancelTask()
+            }
         }
         SnackbarHost(
             snackbar,
@@ -140,9 +195,64 @@ fun FileManagerScreen(vm: FileManagerViewModel) {
     }
 }
 
+private fun tabTitle(v: FileManagerViewModel): String {
+    val d = v.currentDir
+    val c = v.category
+    return when {
+        c != null -> c.label
+        d == null -> "Home"
+        d.absolutePath == Environment.getExternalStorageDirectory().absolutePath -> "Internal"
+        else -> d.name.ifEmpty { "/" }
+    }
+}
+
+@Composable
+private fun TabStrip(tabs: TabsViewModel, vms: List<FileManagerViewModel>) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceContainer)
+            .statusBarsPadding()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        tabs.ids.forEachIndexed { i, id ->
+            val v = vms.getOrNull(i)
+            FilterChip(
+                selected = id == tabs.active,
+                onClick = { tabs.selectTab(id) },
+                label = {
+                    Text(
+                        if (v != null) tabTitle(v) else "Tab",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 120.dp)
+                    )
+                },
+                trailingIcon = {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Close tab",
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clickable { tabs.closeTab(id) }
+                    )
+                }
+            )
+        }
+        IconButton(onClick = {
+            tabs.addTab(vms.getOrNull(tabs.ids.indexOf(tabs.active))?.currentDir)
+        }) {
+            Icon(Icons.Default.Add, contentDescription = "New tab")
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun FilesContent(vm: FileManagerViewModel) {
+private fun FilesContent(vm: FileManagerViewModel, tabs: TabsViewModel) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val haptic = LocalHapticFeedback.current
@@ -179,6 +289,8 @@ private fun FilesContent(vm: FileManagerViewModel) {
         when {
             vm.selected.isNotEmpty() -> vm.toggleSelect(item.path)
             item.isDir -> vm.open(item.file)
+            item.nameKey.endsWith(".vfenc") -> dialog = UiDialog.Decrypt(item.file)
+            item.kind == FileKind.ARCHIVE && isExtractable(item.file) -> vm.openArchive(item.file)
             else -> {
                 if (!vm.openInternally(item)) openFile(context, item.file)
             }
@@ -264,6 +376,38 @@ private fun FilesContent(vm: FileManagerViewModel) {
                                         vm.invertSelection()
                                     }
                                 )
+                                if (selectedFiles.isNotEmpty() && selectedFiles.all { it.isFile }) {
+                                    DropdownMenuItem(
+                                        text = { Text("Encrypt…") },
+                                        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
+                                        onClick = {
+                                            moreOpen = false
+                                            dialog = UiDialog.Encrypt(selectedFiles)
+                                        }
+                                    )
+                                }
+                                if (single != null && single.isFile && single.name.endsWith(".vfenc")) {
+                                    DropdownMenuItem(
+                                        text = { Text("Decrypt…") },
+                                        leadingIcon = { Icon(Icons.Default.LockOpen, contentDescription = null) },
+                                        onClick = {
+                                            moreOpen = false
+                                            dialog = UiDialog.Decrypt(single)
+                                        }
+                                    )
+                                }
+                                if (single != null && single.isFile &&
+                                    (isExtractable(single) || single.extension.equals("apk", ignoreCase = true))
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Browse archive") },
+                                        leadingIcon = { Icon(Icons.Default.FolderZip, contentDescription = null) },
+                                        onClick = {
+                                            moreOpen = false
+                                            vm.openArchive(single)
+                                        }
+                                    )
+                                }
                                 if (selectedFiles.size > 1) {
                                     DropdownMenuItem(
                                         text = { Text("Batch rename…") },
@@ -376,6 +520,9 @@ private fun FilesContent(vm: FileManagerViewModel) {
                     },
                     actions = {
                         if (atHome) {
+                            IconButton(onClick = { tabs.addTab(null) }) {
+                                Icon(Icons.Default.Tab, contentDescription = "New tab")
+                            }
                             IconButton(onClick = { vm.openTrash() }) {
                                 Icon(Icons.Default.Delete, contentDescription = "Trash")
                             }
@@ -425,6 +572,22 @@ private fun FilesContent(vm: FileManagerViewModel) {
                                         onClick = {
                                             menuOpen = false
                                             dialog = UiDialog.GoTo
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("New tab here") },
+                                        leadingIcon = { Icon(Icons.Default.Tab, contentDescription = null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            tabs.addTab(vm.currentDir)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Share folder over Wi-Fi") },
+                                        leadingIcon = { Icon(Icons.Default.Wifi, contentDescription = null) },
+                                        onClick = {
+                                            menuOpen = false
+                                            vm.openShare(vm.currentDir)
                                         }
                                     )
                                     DropdownMenuItem(
@@ -492,6 +655,16 @@ private fun FilesContent(vm: FileManagerViewModel) {
                     if (!vm.openInternally(item, vm.recent)) openFile(context, item.file)
                 }
             } else {
+                var pulling by remember { mutableStateOf(false) }
+                LaunchedEffect(vm.loading) { if (!vm.loading) pulling = false }
+                PullToRefreshBox(
+                    isRefreshing = pulling,
+                    onRefresh = {
+                        pulling = true
+                        vm.refresh()
+                    },
+                    modifier = Modifier.fillMaxSize()
+                ) {
                 Column(Modifier.fillMaxSize()) {
                     if (dir != null) {
                         Breadcrumbs(dir, roots) { vm.open(it) }
@@ -555,9 +728,7 @@ private fun FilesContent(vm: FileManagerViewModel) {
                         }
                     }
                 }
-            }
-            vm.busy?.let {
-                BusyOverlay(it, vm.taskProgress, vm.taskDetail, vm.taskCancellable) { vm.cancelTask() }
+                }
             }
         }
     }
@@ -644,6 +815,28 @@ private fun FilesContent(vm: FileManagerViewModel) {
             },
             onDismiss = { dialog = null }
         )
+        is UiDialog.Encrypt -> PasswordDialog(
+            title = "Encrypt ${d.files.size} file(s)",
+            confirmPassword = true,
+            extraLabel = "Move the originals to trash",
+            confirm = "Encrypt",
+            onConfirm = { pass, trashOriginals ->
+                vm.encryptFiles(d.files, pass, trashOriginals)
+                dialog = null
+            },
+            onDismiss = { dialog = null }
+        )
+        is UiDialog.Decrypt -> PasswordDialog(
+            title = "Decrypt ${d.file.name}",
+            confirmPassword = false,
+            extraLabel = null,
+            confirm = "Decrypt",
+            onConfirm = { pass, _ ->
+                vm.decryptFile(d.file, pass)
+                dialog = null
+            },
+            onDismiss = { dialog = null }
+        )
         is UiDialog.Compress -> CompressDialog(
             files = d.files,
             onConfirm = { name, format ->
@@ -652,8 +845,73 @@ private fun FilesContent(vm: FileManagerViewModel) {
             },
             onDismiss = { dialog = null }
         )
-        is UiDialog.Info -> InfoDialog(d.file, settings) { dialog = null }
+        is UiDialog.Info -> InfoDialog(d.file, settings, onCopied = { vm.showMessage("Copied") }) { dialog = null }
     }
+}
+
+@Composable
+private fun PasswordDialog(
+    title: String,
+    confirmPassword: Boolean,
+    extraLabel: String?,
+    confirm: String,
+    onConfirm: (String, Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var pass by remember { mutableStateOf("") }
+    var pass2 by remember { mutableStateOf("") }
+    var extra by remember { mutableStateOf(false) }
+    val mismatch = confirmPassword && pass2.isNotEmpty() && pass != pass2
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = pass,
+                    onValueChange = { pass = it },
+                    singleLine = true,
+                    label = { Text("Password") },
+                    visualTransformation = PasswordVisualTransformation()
+                )
+                if (confirmPassword) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = pass2,
+                        onValueChange = { pass2 = it },
+                        singleLine = true,
+                        isError = mismatch,
+                        label = { Text("Repeat password") },
+                        visualTransformation = PasswordVisualTransformation()
+                    )
+                }
+                if (extraLabel != null) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable { extra = !extra },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(checked = extra, onCheckedChange = { extra = it })
+                        Text(extraLabel)
+                    }
+                }
+                if (confirmPassword) {
+                    Text(
+                        "If you forget the password the files can't be recovered.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (pass.isNotEmpty() && (!confirmPassword || pass == pass2)) onConfirm(pass, extra)
+            }) { Text(confirm) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable
@@ -738,7 +996,7 @@ private fun CompressDialog(
 }
 
 @Composable
-private fun InfoDialog(file: File, settings: Settings, onDismiss: () -> Unit) {
+private fun InfoDialog(file: File, settings: Settings, onCopied: () -> Unit, onDismiss: () -> Unit) {
     val clipboard = LocalClipboardManager.current
     val size by produceState("Calculating…", file) {
         value = withContext(Dispatchers.IO) {
@@ -779,8 +1037,14 @@ private fun InfoDialog(file: File, settings: Settings, onDismiss: () -> Unit) {
                     } else {
                         val m = md5 ?: ""
                         val s = sha ?: ""
-                        InfoLine("MD5 (tap to copy)", m, onClick = { clipboard.setText(AnnotatedString(m)) })
-                        InfoLine("SHA-256 (tap to copy)", s, onClick = { clipboard.setText(AnnotatedString(s)) })
+                        InfoLine("MD5 (tap to copy)", m, onClick = {
+                            clipboard.setText(AnnotatedString(m))
+                            onCopied()
+                        })
+                        InfoLine("SHA-256 (tap to copy)", s, onClick = {
+                            clipboard.setText(AnnotatedString(s))
+                            onCopied()
+                        })
                     }
                 }
             }
@@ -1134,6 +1398,13 @@ private fun HomeContent(
         item { ToolRow(Icons.Default.Android, "Apps") { vm.openApps() } }
         item { ToolRow(Icons.Default.PieChart, "Storage analyzer") { vm.openAnalyzer() } }
         item { ToolRow(Icons.Default.ContentCopy, "Duplicate finder") { vm.openDuplicates() } }
+        item { ToolRow(Icons.Default.CleaningServices, "Cleaner") { vm.openCleaner() } }
+        item {
+            ToolRow(
+                Icons.Default.Wifi,
+                if (ShareManager.running) "Wi-Fi share (on)" else "Wi-Fi share"
+            ) { vm.openShare(null) }
+        }
         item { ToolRow(Icons.Default.Settings, "Settings") { vm.openSettings() } }
         item { Spacer(Modifier.height(24.dp)) }
     }

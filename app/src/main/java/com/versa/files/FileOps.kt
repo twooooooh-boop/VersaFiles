@@ -201,7 +201,7 @@ fun openFile(context: Context, file: File) {
             .setDataAndType(uri, mimeOf(file))
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         val chooser = Intent.createChooser(intent, "Open with")
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         context.startActivity(chooser)
     } catch (e: Exception) {
         Toast.makeText(context, "No app can open this file", Toast.LENGTH_SHORT).show()

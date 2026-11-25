@@ -316,7 +316,13 @@ fun SettingsScreen(vm: FileManagerViewModel) {
                 if (s.trashEnabled) "Deleted files go to trash so you can restore them"
                 else "Deleted files are removed permanently",
                 s.trashEnabled
-            ) { v -> vm.updateSettings { it.copy(trashEnabled = v) } }
+            ) { v ->
+                vm.updateSettings { it.copy(trashEnabled = v) }
+                vm.showMessage(
+                    if (v) "Trash turned on. Deleted files can be restored"
+                    else "Trash turned off. Deletes are permanent (Undo works for a few seconds)"
+                )
+            }
             LabelText("Empty trash automatically")
             val dayOptions = listOf(0, 7, 30, 60)
             ChipRow(
@@ -353,7 +359,7 @@ fun SettingsScreen(vm: FileManagerViewModel) {
 
             SectionTitle("About")
             Text(
-                "VersaFiles 1.3",
+                "VersaFiles 1.4",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 16.dp, bottom = 32.dp)

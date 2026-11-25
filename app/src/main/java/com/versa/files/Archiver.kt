@@ -108,7 +108,7 @@ object Archiver {
         }
     }
 
-    private fun safeTarget(destDir: File, name: String): File {
+    fun safeTarget(destDir: File, name: String): File {
         val target = File(destDir, name)
         if (!target.canonicalPath.startsWith(destDir.canonicalPath + File.separator)) {
             throw SecurityException("Blocked unsafe path: $name")

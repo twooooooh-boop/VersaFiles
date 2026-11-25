@@ -42,6 +42,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 
 class MainActivity : ComponentActivity() {
     private val vm: FileManagerViewModel by viewModels()
+    private val tabs: TabsViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,7 +50,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             VersaTheme(vm.settings) {
-                Root(vm)
+                Root(vm, tabs)
             }
         }
     }
@@ -65,7 +66,7 @@ private fun hasStorageAccess(context: Context): Boolean =
     }
 
 @Composable
-private fun Root(vm: FileManagerViewModel) {
+private fun Root(vm: FileManagerViewModel, tabs: TabsViewModel) {
     val context = LocalContext.current
     var granted by remember { mutableStateOf(hasStorageAccess(context)) }
 
@@ -81,7 +82,7 @@ private fun Root(vm: FileManagerViewModel) {
     ) { granted = hasStorageAccess(context) }
 
     if (granted) {
-        FileManagerScreen(vm)
+        FileManagerScreen(vm, tabs)
     } else {
         PermissionScreen(onGrant = {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {

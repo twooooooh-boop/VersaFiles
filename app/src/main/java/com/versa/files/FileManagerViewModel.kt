@@ -15,10 +15,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.CancellationException
+import kotlin.concurrent.thread
 
 const val MAX_EDIT_BYTES = 200L * 1024
 
-enum class Page { FILES, TRASH, ANALYZER, DUPLICATES, APPS, SETTINGS }
+enum class Page { FILES, TRASH, ANALYZER, DUPLICATES, CLEANER, APPS, SHARE, ARCHIVE, SETTINGS }
 
 data class PasteBuffer(val files: List<File>, val move: Boolean)
 
@@ -30,6 +31,8 @@ data class UiMessage(
 )
 
 data class ViewerState(val files: List<File>, val index: Int)
+
+private class PendingDelete(val restore: () -> Unit, val commit: () -> Unit)
 
 class FileManagerViewModel : ViewModel() {
 
@@ -48,8 +51,6 @@ class FileManagerViewModel : ViewModel() {
     var showHidden by mutableStateOf(false)
         private set
     var viewMode by mutableStateOf(ViewMode.LIST)
-        private set
-    var clipboard by mutableStateOf<PasteBuffer?>(null)
         private set
     var busy by mutableStateOf<String?>(null)
         private set
@@ -73,11 +74,13 @@ class FileManagerViewModel : ViewModel() {
         private set
     var page by mutableStateOf(Page.FILES)
         private set
-    var favorites by mutableStateOf<List<String>>(emptyList())
-        private set
     var viewer by mutableStateOf<ViewerState?>(null)
         private set
     var editing by mutableStateOf<File?>(null)
+        private set
+    var playing by mutableStateOf<File?>(null)
+        private set
+    var pdfFile by mutableStateOf<File?>(null)
         private set
     var trashEntries by mutableStateOf<List<TrashEntry>>(emptyList())
         private set
@@ -91,8 +94,6 @@ class FileManagerViewModel : ViewModel() {
         private set
     var scannedCount by mutableStateOf(0L)
         private set
-    var settings by mutableStateOf(Settings())
-        private set
     var recent by mutableStateOf<List<FileItem>>(emptyList())
         private set
     var dupGroups by mutableStateOf<List<DupGroup>>(emptyList())
@@ -103,6 +104,14 @@ class FileManagerViewModel : ViewModel() {
         private set
     var dupSelected by mutableStateOf<Set<String>>(emptySet())
         private set
+    var cleanGroups by mutableStateOf<List<JunkGroup>>(emptyList())
+        private set
+    var cleanScanning by mutableStateOf(false)
+        private set
+    var cleanProgress by mutableStateOf(0L)
+        private set
+    var cleanSelected by mutableStateOf<Set<String>>(emptySet())
+        private set
     var apps by mutableStateOf<List<AppInfo>>(emptyList())
         private set
     var appsLoading by mutableStateOf(false)
@@ -111,6 +120,35 @@ class FileManagerViewModel : ViewModel() {
         private set
     var appQuery by mutableStateOf("")
         private set
+    var archiveFile by mutableStateOf<File?>(null)
+        private set
+    var archivePrefix by mutableStateOf("")
+        private set
+    var archiveItems by mutableStateOf<List<ArchiveEntryItem>>(emptyList())
+        private set
+    var archiveSelected by mutableStateOf<Set<String>>(emptySet())
+        private set
+    var archiveLoading by mutableStateOf(false)
+        private set
+    var shareTarget by mutableStateOf<File?>(null)
+        private set
+
+    // shared between all tabs
+    var settings: Settings
+        get() = SharedState.settings
+        private set(value) {
+            SharedState.settings = value
+        }
+    var favorites: List<String>
+        get() = SharedState.favorites
+        private set(value) {
+            SharedState.favorites = value
+        }
+    var clipboard: PasteBuffer?
+        get() = SharedState.clipboard
+        private set(value) {
+            SharedState.clipboard = value
+        }
 
     val searchActive: Boolean
         get() = query.isNotBlank() || searchKinds.isNotEmpty()
@@ -119,13 +157,19 @@ class FileManagerViewModel : ViewModel() {
     private var loadJob: Job? = null
     private var analyzerJob: Job? = null
     private var dupJob: Job? = null
+    private var cleanJob: Job? = null
     private var appContext: Context? = null
     private var prefs: Prefs? = null
     private var trash: TrashManager? = null
-    private var lastTrashed: List<TrashEntry> = emptyList()
+    private var staging: TrashManager? = null
+    private var stagingDir: File? = null
     private var currentProgress: TaskProgress? = null
+    private var undoAction: (() -> Unit)? = null
+    private var pending: PendingDelete? = null
+    private var pendingJob: Job? = null
+    private var archiveSession: ArchiveSession? = null
 
-    fun attach(context: Context) {
+    fun attach(context: Context, applyStart: Boolean = true) {
         if (appContext != null) return
         val app = context.applicationContext
         appContext = app
@@ -136,25 +180,51 @@ class FileManagerViewModel : ViewModel() {
         ascending = p.ascending
         showHidden = p.showHidden
         viewMode = if (p.gridView) ViewMode.GRID else ViewMode.LIST
-        favorites = p.favorites
-        settings = p.loadSettings()
+        if (!SharedState.loaded) {
+            SharedState.loaded = true
+            settings = p.loadSettings()
+            favorites = p.favorites
+        }
         val tm = TrashManager(app.getExternalFilesDir("trash") ?: File(app.filesDir, "trash"))
         trash = tm
-        val days = settings.trashAutoEmptyDays
-        if (days > 0) {
+        val sd = app.getExternalFilesDir("staging") ?: File(app.filesDir, "staging")
+        sd.mkdirs()
+        stagingDir = sd
+        staging = TrashManager(sd)
+        if (!SharedState.started) {
+            SharedState.started = true
+            val days = settings.trashAutoEmptyDays
             viewModelScope.launch(Dispatchers.IO) {
                 try {
-                    tm.purgeOlderThan(days)
+                    sd.listFiles()?.forEach { it.deleteRecursively() }
+                    File(app.cacheDir, "archive_tmp").deleteRecursively()
+                    if (days > 0) tm.purgeOlderThan(days)
                 } catch (e: Throwable) {
                     // ignore
                 }
             }
         }
-        when (settings.startLocation) {
-            StartLocation.INTERNAL -> open(Environment.getExternalStorageDirectory())
-            StartLocation.DOWNLOADS ->
-                open(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS))
-            StartLocation.HOME -> loadRecent()
+        if (applyStart) {
+            when (settings.startLocation) {
+                StartLocation.INTERNAL -> open(Environment.getExternalStorageDirectory())
+                StartLocation.DOWNLOADS ->
+                    open(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS))
+                StartLocation.HOME -> loadRecent()
+            }
+        }
+    }
+
+    override fun onCleared() {
+        val p = pending
+        pending = null
+        if (p != null) {
+            thread(isDaemon = false) {
+                try {
+                    p.commit()
+                } catch (e: Throwable) {
+                    // ignore
+                }
+            }
         }
     }
 
@@ -187,6 +257,7 @@ class FileManagerViewModel : ViewModel() {
         settings = s
         p?.saveSettings(s)
         refresh()
+        showMessage("Settings reset to defaults")
     }
 
     fun clearThumbCache() {
@@ -387,7 +458,7 @@ class FileManagerViewModel : ViewModel() {
         prefs?.gridView = mode == ViewMode.GRID
     }
 
-    // ---------- built-in viewer / editor ----------
+    // ---------- built-in viewers ----------
 
     fun openInternally(item: FileItem, pool: List<FileItem> = items): Boolean {
         when (item.kind) {
@@ -401,12 +472,33 @@ class FileManagerViewModel : ViewModel() {
                 editing = item.file
                 return true
             }
+            FileKind.VIDEO, FileKind.AUDIO -> {
+                playing = item.file
+                return true
+            }
+            FileKind.PDF -> {
+                pdfFile = item.file
+                return true
+            }
             else -> return false
         }
     }
 
     fun closeViewer() {
         viewer = null
+    }
+
+    fun closePlayer() {
+        playing = null
+    }
+
+    fun closePdf() {
+        pdfFile = null
+    }
+
+    fun playerFallback(file: File) {
+        playing = null
+        appContext?.let { openFile(it, file) }
     }
 
     fun deleteFromViewer(file: File) {
@@ -435,13 +527,17 @@ class FileManagerViewModel : ViewModel() {
     // ---------- clipboard & file tasks ----------
 
     fun copySelected(move: Boolean) {
-        clipboard = PasteBuffer(selectedFiles(), move)
+        val files = selectedFiles()
+        clipboard = PasteBuffer(files, move)
         selected = emptySet()
-        showMessage(if (move) "Cut. Open the destination and tap Paste" else "Copied. Open the destination and tap Paste")
+        showMessage(
+            (if (move) "Cut " else "Copied ") + "${files.size} item(s). Open the destination and tap Paste"
+        )
     }
 
     fun cancelClipboard() {
         clipboard = null
+        showMessage("Cancelled")
     }
 
     fun cancelTask() {
@@ -450,13 +546,13 @@ class FileManagerViewModel : ViewModel() {
 
     private fun runTask(
         label: String,
-        undoable: Boolean = false,
         progress: TaskProgress? = null,
         work: () -> String
     ) {
         viewModelScope.launch {
             busy = label
             currentProgress = progress
+            undoAction = null
             taskProgress = null
             taskDetail = ""
             taskCancellable = progress != null
@@ -487,8 +583,10 @@ class FileManagerViewModel : ViewModel() {
                 err is CancellationException -> "Cancelled"
                 else -> "Error: ${err.message ?: err.javaClass.simpleName}"
             }
-            if (undoable && err == null && lastTrashed.isNotEmpty()) {
-                showMessage(text, "Undo") { undoTrash() }
+            val undo = undoAction
+            undoAction = null
+            if (err == null && undo != null) {
+                showMessage(text, "Undo") { undo() }
             } else {
                 showMessage(text)
             }
@@ -497,15 +595,106 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
-    private fun undoTrash() {
-        val t = trash ?: return
-        val entries = lastTrashed
-        lastTrashed = emptyList()
-        if (entries.isEmpty()) return
+    // ----- undo support for deletes -----
+
+    private fun commitPending() {
+        val p = pending ?: return
+        pending = null
+        pendingJob?.cancel()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                p.commit()
+            } catch (e: Throwable) {
+                // ignore
+            }
+        }
+    }
+
+    private fun registerPending(p: PendingDelete) {
+        commitPending()
+        pending = p
+        pendingJob = viewModelScope.launch {
+            delay(15_000)
+            if (pending === p) {
+                pending = null
+                withContext(Dispatchers.IO) {
+                    try {
+                        p.commit()
+                    } catch (e: Throwable) {
+                        // ignore
+                    }
+                }
+            }
+        }
+    }
+
+    private fun undoPending(p: PendingDelete) {
+        if (pending !== p) {
+            showMessage("Too late to undo")
+            return
+        }
+        pending = null
+        pendingJob?.cancel()
+        runTask("Restoring…") {
+            p.restore()
+            "Restored"
+        }
+    }
+
+    private fun restoreEntries(t: TrashManager, entries: List<TrashEntry>) {
         runTask("Restoring…") {
             entries.forEach { t.restore(it) }
             "Restored ${entries.size} item(s)"
         }
+    }
+
+    /** Runs on a background thread. Sets undoAction when the delete can be undone. */
+    private fun deleteWork(files: List<File>, permanent: Boolean): String {
+        val t = trash
+        val sm = staging
+        if (!permanent && settings.trashEnabled && t != null) {
+            val entries = t.trash(files)
+            undoAction = { restoreEntries(t, entries) }
+            return "Moved ${files.size} item(s) to trash"
+        }
+        val primary = Environment.getExternalStorageDirectory().absolutePath
+        val stageable = if (sm != null) files.filter { it.absolutePath.startsWith(primary) } else emptyList()
+        val direct = files.filter { it !in stageable }
+        val entries = if (sm != null && stageable.isNotEmpty()) sm.trash(stageable) else emptyList()
+        direct.forEach { it.deleteRecursively() }
+        if (sm != null && entries.isNotEmpty()) {
+            val p = PendingDelete(
+                restore = { entries.forEach { sm.restore(it) } },
+                commit = { entries.forEach { sm.purge(it) } }
+            )
+            registerPending(p)
+            undoAction = { undoPending(p) }
+            return "Deleted ${files.size} item(s)"
+        }
+        return "Deleted ${files.size} item(s) permanently"
+    }
+
+    /** Removes trash entries but keeps them aside for a few seconds so Undo works. */
+    private fun stashTrash(entries: List<TrashEntry>): String {
+        val dir = stagingDir
+        if (dir == null) {
+            entries.forEach { trash?.purge(it) }
+            return "Deleted ${entries.size} item(s) from trash"
+        }
+        val moved = ArrayList<Pair<File, File>>()
+        for (e in entries) {
+            val target = File(dir, "p_" + e.folder.name)
+            if (e.folder.renameTo(target)) moved.add(e.folder to target) else e.folder.deleteRecursively()
+        }
+        if (moved.isNotEmpty()) {
+            val p = PendingDelete(
+                restore = { moved.forEach { (orig, staged) -> staged.renameTo(orig) } },
+                commit = { moved.forEach { it.second.deleteRecursively() } }
+            )
+            registerPending(p)
+            undoAction = { undoPending(p) }
+        }
+        return "Deleted ${entries.size} item(s) from trash"
     }
 
     fun paste() {
@@ -529,19 +718,8 @@ class FileManagerViewModel : ViewModel() {
 
     fun delete(files: List<File>, permanent: Boolean) {
         selected = emptySet()
-        val t = trash
-        if (permanent || t == null || !settings.trashEnabled) {
-            runTask("Deleting…") {
-                var failed = 0
-                files.forEach { if (!it.deleteRecursively()) failed++ }
-                if (failed == 0) "Deleted ${files.size} item(s)" else "Could not delete $failed item(s)"
-            }
-        } else {
-            runTask("Moving to trash…", undoable = true) {
-                lastTrashed = t.trash(files)
-                "Moved ${files.size} item(s) to trash"
-            }
-        }
+        val toTrash = !permanent && settings.trashEnabled
+        runTask(if (toTrash) "Moving to trash…" else "Deleting…") { deleteWork(files, permanent) }
     }
 
     fun rename(file: File, newName: String) {
@@ -634,14 +812,166 @@ class FileManagerViewModel : ViewModel() {
         }
     }
 
+    // ---------- encryption ----------
+
+    fun encryptFiles(files: List<File>, password: String, trashOriginals: Boolean) {
+        selected = emptySet()
+        val p = TaskProgress()
+        runTask("Encrypting…", progress = p) {
+            val list = files.filter { it.isFile }
+            if (list.isEmpty()) throw IllegalArgumentException("Select files (compress folders first)")
+            p.total = list.sumOf { it.length() }
+            for (f in list) {
+                val parent = f.parentFile ?: throw IllegalStateException("No parent folder")
+                val out = FileOps.uniqueFile(parent, f.name + ".vfenc")
+                try {
+                    Crypto.encrypt(f, out, password, p)
+                } catch (e: Throwable) {
+                    out.delete()
+                    throw e
+                }
+            }
+            if (trashOriginals) {
+                deleteWork(list, false)
+                "Encrypted ${list.size} file(s). Originals moved to trash"
+            } else {
+                "Encrypted ${list.size} file(s). The originals are still there"
+            }
+        }
+    }
+
+    fun decryptFile(file: File, password: String) {
+        val p = TaskProgress()
+        runTask("Decrypting…", progress = p) {
+            val parent = file.parentFile ?: throw IllegalStateException("No parent folder")
+            val base = if (file.name.endsWith(".vfenc")) file.name.removeSuffix(".vfenc") else file.name + ".decrypted"
+            val out = FileOps.uniqueFile(parent, base)
+            try {
+                Crypto.decrypt(file, out, password, p)
+            } catch (e: Throwable) {
+                out.delete()
+                throw e
+            }
+            "Decrypted to ${out.name}"
+        }
+    }
+
+    // ---------- archive browser ----------
+
+    fun openArchive(file: File) {
+        page = Page.ARCHIVE
+        archiveFile = file
+        archivePrefix = ""
+        archiveSelected = emptySet()
+        archiveItems = emptyList()
+        archiveLoading = true
+        archiveSession = null
+        viewModelScope.launch {
+            val s = ArchiveSession(file)
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    s.load()
+                    true
+                } catch (e: Throwable) {
+                    false
+                }
+            }
+            if (ok) {
+                archiveSession = s
+                archiveItems = s.list("")
+            } else {
+                showMessage("Can't read this archive")
+                closeArchive()
+            }
+            archiveLoading = false
+        }
+    }
+
+    fun archiveOpenDir(path: String) {
+        archivePrefix = path
+        archiveSelected = emptySet()
+        archiveItems = archiveSession?.list(path) ?: emptyList()
+    }
+
+    /** Returns false when already at the archive root. */
+    fun archiveUp(): Boolean {
+        if (archivePrefix.isEmpty()) return false
+        val parent = archivePrefix.trimEnd('/').substringBeforeLast('/', "")
+        archiveOpenDir(if (parent.isEmpty()) "" else "$parent/")
+        return true
+    }
+
+    fun toggleArchiveSelect(path: String) {
+        archiveSelected = if (path in archiveSelected) archiveSelected - path else archiveSelected + path
+    }
+
+    fun clearArchiveSelection() {
+        archiveSelected = emptySet()
+    }
+
+    fun closeArchive() {
+        page = Page.FILES
+        archiveFile = null
+        archiveSession = null
+        archiveItems = emptyList()
+        archiveSelected = emptySet()
+        archivePrefix = ""
+        refresh()
+    }
+
+    fun extractArchive(selectedOnly: Boolean) {
+        val file = archiveFile ?: return
+        val s = archiveSession ?: return
+        val sel = if (selectedOnly) archiveSelected else null
+        val base = if (selectedOnly) archivePrefix else ""
+        archiveSelected = emptySet()
+        val p = TaskProgress()
+        runTask("Extracting…", progress = p) {
+            val parent = file.parentFile ?: throw IllegalStateException("No parent folder")
+            val dest = FileOps.uniqueFile(parent, file.nameWithoutExtension)
+            try {
+                s.extract(sel, base, dest, p)
+            } catch (e: Throwable) {
+                dest.deleteRecursively()
+                throw e
+            }
+            "Extracted to ${dest.name}"
+        }
+    }
+
+    fun openArchiveEntry(entry: ArchiveEntryItem) {
+        val s = archiveSession ?: return
+        val ctx = appContext ?: return
+        viewModelScope.launch {
+            busy = "Opening ${entry.name}…"
+            val result = withContext(Dispatchers.IO) {
+                runCatching { s.extractToCache(File(ctx.cacheDir, "archive_tmp"), entry.path) }
+            }
+            busy = null
+            val f = result.getOrNull()
+            if (f == null) {
+                showMessage("Can't open this file")
+            } else {
+                val item = toItem(f)
+                if (!openInternally(item, listOf(item))) openFile(ctx, f)
+            }
+        }
+    }
+
     // ---------- tool pages ----------
 
     fun closePage() {
+        if (page == Page.ARCHIVE) {
+            closeArchive()
+            return
+        }
         page = Page.FILES
         analyzerJob?.cancel()
         dupJob?.cancel()
+        cleanJob?.cancel()
         analyzing = false
         dupScanning = false
+        cleanScanning = false
         loadRecent()
     }
 
@@ -685,19 +1015,12 @@ class FileManagerViewModel : ViewModel() {
     }
 
     fun purgeTrash(e: TrashEntry) {
-        val t = trash ?: return
-        runTask("Deleting…") {
-            t.purge(e)
-            "Deleted ${e.item.name} permanently"
-        }
+        runTask("Deleting…") { stashTrash(listOf(e)) }
     }
 
     fun emptyTrash() {
         val t = trash ?: return
-        runTask("Emptying trash…") {
-            t.emptyAll()
-            "Trash emptied"
-        }
+        runTask("Emptying trash…") { stashTrash(t.list()) }
     }
 
     fun openAnalyzer() {
@@ -758,21 +1081,71 @@ class FileManagerViewModel : ViewModel() {
         val victims = dupSelected.map { File(it) }
         if (victims.isEmpty()) return
         dupSelected = emptySet()
-        val t = trash
-        val useTrash = settings.trashEnabled && t != null
-        runTask(if (useTrash) "Moving to trash…" else "Deleting…", undoable = useTrash) {
-            if (useTrash && t != null) {
-                lastTrashed = t.trash(victims)
-            } else {
-                victims.forEach { it.deleteRecursively() }
-            }
+        runTask("Deleting duplicates…") {
+            val msg = deleteWork(victims, false)
             val gone = victims.map { it.absolutePath }.toSet()
             dupGroups = dupGroups
                 .map { g -> g.copy(files = g.files.filter { it.absolutePath !in gone }) }
                 .filter { it.files.size > 1 }
-            if (useTrash) "Moved ${victims.size} duplicate(s) to trash"
-            else "Deleted ${victims.size} duplicate(s)"
+            msg
         }
+    }
+
+    // ---------- cleaner ----------
+
+    fun openCleaner() {
+        page = Page.CLEANER
+        startCleanScan()
+    }
+
+    fun startCleanScan() {
+        cleanJob?.cancel()
+        cleanScanning = true
+        cleanProgress = 0L
+        cleanSelected = emptySet()
+        cleanGroups = emptyList()
+        cleanJob = viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                Cleaner.scan(
+                    Environment.getExternalStorageDirectory(),
+                    { n -> cleanProgress = n },
+                    { isActive }
+                )
+            }
+            cleanGroups = result
+            cleanScanning = false
+        }
+    }
+
+    fun toggleClean(path: String) {
+        cleanSelected = if (path in cleanSelected) cleanSelected - path else cleanSelected + path
+    }
+
+    fun toggleCleanGroup(group: JunkGroup) {
+        val paths = group.files.map { it.file.absolutePath }
+        cleanSelected = if (paths.all { it in cleanSelected }) cleanSelected - paths.toSet()
+        else cleanSelected + paths
+    }
+
+    fun cleanSelectedNow() {
+        val victims = cleanSelected.map { File(it) }
+        if (victims.isEmpty()) return
+        cleanSelected = emptySet()
+        runTask("Cleaning…") {
+            val msg = deleteWork(victims, false)
+            val gone = victims.map { it.absolutePath }.toSet()
+            cleanGroups = cleanGroups
+                .map { g -> g.copy(files = g.files.filter { it.file.absolutePath !in gone }) }
+                .filter { it.files.isNotEmpty() }
+            msg
+        }
+    }
+
+    // ---------- Wi-Fi share ----------
+
+    fun openShare(folder: File?) {
+        shareTarget = folder ?: Environment.getExternalStorageDirectory()
+        page = Page.SHARE
     }
 
     // ---------- apps ----------
