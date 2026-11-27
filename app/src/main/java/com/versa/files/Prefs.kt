@@ -96,7 +96,9 @@ class Prefs(context: Context) {
         trashEnabled = sp.getBoolean("s_trash", true),
         trashAutoEmptyDays = sp.getInt("s_trashdays", 30),
         conflictMode = sp.getInt("s_conflict", 0),
-        askOpenWith = sp.getBoolean("s_askopen", true)
+        askOpenWith = sp.getBoolean("s_askopen", true),
+        editorMaxKb = sp.getInt("s_editormax", 200),
+        thumbMask = sp.getInt("s_thumbmask", 31)
     )
 
     fun saveSettings(s: Settings) {
@@ -124,6 +126,8 @@ class Prefs(context: Context) {
             .putInt("s_trashdays", s.trashAutoEmptyDays)
             .putInt("s_conflict", s.conflictMode)
             .putBoolean("s_askopen", s.askOpenWith)
+            .putInt("s_editormax", s.editorMaxKb)
+            .putInt("s_thumbmask", s.thumbMask)
             .apply()
     }
 }

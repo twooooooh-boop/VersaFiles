@@ -33,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -169,14 +170,17 @@ private fun ViewerInfoLine(label: String, value: String) {
 
 @Composable
 private fun ZoomableImage(file: File) {
+    var failed by remember(file) { mutableStateOf(false) }
     val bmp by produceState<Bitmap?>(null, file) {
-        value = withContext(Dispatchers.IO) {
+        val result = withContext(Dispatchers.IO) {
             try {
                 Thumbs.decodeImage(file, 2048)
             } catch (e: Throwable) {
                 null
             }
         }
+        value = result
+        if (result == null) failed = true
     }
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
@@ -225,7 +229,11 @@ private fun ZoomableImage(file: File) {
     ) {
         val b = bmp
         if (b == null) {
-            CircularProgressIndicator(color = Color.White)
+            if (failed) {
+                Text("Can't display this image", color = Color.White)
+            } else {
+                CircularProgressIndicator(color = Color.White)
+            }
         } else {
             val image = remember(b) { b.asImageBitmap() }
             Image(

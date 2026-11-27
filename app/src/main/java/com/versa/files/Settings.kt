@@ -56,5 +56,7 @@ data class Settings(
     val trashEnabled: Boolean = true,
     val trashAutoEmptyDays: Int = 30,
     val conflictMode: Int = 0,
-    val askOpenWith: Boolean = true
+    val askOpenWith: Boolean = true,
+    val editorMaxKb: Int = 200,
+    val thumbMask: Int = 31
 )

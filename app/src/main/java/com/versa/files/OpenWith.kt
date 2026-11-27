@@ -3,6 +3,8 @@ package com.versa.files
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.compose.runtime.Immutable
 import androidx.core.content.FileProvider
@@ -23,7 +25,15 @@ data class OpenRequest(
     val item: FileItem,
     val pool: List<FileItem>,
     val targets: List<OpenTarget>,
-    val key: String
+    val key: String,
+    val currentDefault: String?
+)
+
+@Immutable
+data class AssocEditor(
+    val ext: String,
+    val targets: List<OpenTarget>,
+    val current: String?
 )
 
 object Sniffer {
@@ -31,7 +41,7 @@ object Sniffer {
         val b = ByteArray(n)
         val read = file.inputStream().use { it.read(b) }
         if (read <= 0) null else b.copyOf(read)
-    } catch (e: Exception) {
+    } catch (e: Throwable) {
         null
     }
 
@@ -59,6 +69,49 @@ object Sniffer {
         val b = head(file, 15) ?: return false
         return String(b, Charsets.ISO_8859_1) == "SQLite format 3"
     }
+
+    fun isAxml(file: File): Boolean {
+        val b = head(file, 8) ?: return false
+        return Axml.isAxml(b)
+    }
+
+    /** True for files that are not readable text (contain NUL bytes or lots of control characters). */
+    fun isBinary(file: File): Boolean {
+        val b = head(file, 8192) ?: return false
+        var ctrl = 0
+        for (x in b) {
+            val v = x.toInt() and 0xFF
+            if (v == 0) return true
+            if (v < 9 || v in 14..31) ctrl++
+        }
+        return ctrl * 10 > b.size
+    }
+
+    /** True when some line is longer than limit characters (a text box would choke on it). */
+    fun hasHugeLine(file: File, limit: Int): Boolean {
+        return try {
+            file.inputStream().buffered().use { input ->
+                var run = 0
+                var huge = false
+                while (true) {
+                    val c = input.read()
+                    if (c < 0) break
+                    if (c == '\n'.code) {
+                        run = 0
+                    } else {
+                        run++
+                        if (run > limit) {
+                            huge = true
+                            break
+                        }
+                    }
+                }
+                huge
+            }
+        } catch (e: Throwable) {
+            true
+        }
+    }
 }
 
 object OpenWith {
@@ -67,6 +120,7 @@ object OpenWith {
         "media" to "VersaFiles Media player",
         "pdf" to "VersaFiles PDF viewer",
         "text" to "VersaFiles Text editor",
+        "axml" to "VersaFiles Binary XML viewer",
         "archive" to "VersaFiles Archive viewer",
         "hex" to "VersaFiles Hex viewer",
         "web" to "VersaFiles Web viewer",
@@ -82,13 +136,22 @@ object OpenWith {
         if (id.startsWith("b:")) builtinLabels[id.removePrefix("b:")] ?: id
         else id.removePrefix("e:").substringBefore('/')
 
-    fun targets(context: Context, item: FileItem): List<OpenTarget> {
+    private fun builtinTargets(ids: Collection<String>, textLabel: String): List<OpenTarget> =
+        ids.map { id ->
+            val label = if (id == "text") textLabel else builtinLabels[id] ?: id
+            OpenTarget("b:$id", label, true)
+        }
+
+    fun targets(context: Context, item: FileItem, maxEditBytes: Long): List<OpenTarget> {
         val ext = item.nameKey.substringAfterLast('.', "")
         var kind = item.kind
         if (kind == FileKind.OTHER) {
             Sniffer.kind(item.file)?.let { kind = it }
         }
+        val axml = Sniffer.isAxml(item.file)
+        val binary = !axml && Sniffer.isBinary(item.file)
         val ids = LinkedHashSet<String>()
+        if (axml) ids.add("axml")
         if (ext in docExts) ids.add("doc")
         if (ext in webExts) ids.add("web")
         if (ext in dbExts || Sniffer.isSqlite(item.file)) ids.add("sqlite")
@@ -99,26 +162,50 @@ object OpenWith {
             FileKind.ARCHIVE, FileKind.APK -> ids.add("archive")
             else -> {}
         }
+        if (!axml && !binary) ids.add("text")
+        ids.add("archive")
+        ids.add("hex")
+        val textLabel = if (item.size > maxEditBytes) "VersaFiles Text viewer" else "VersaFiles Text editor"
+        val list = ArrayList<OpenTarget>(builtinTargets(ids, textLabel))
+        list.addAll(external(context, mimeOf(item.file), item.file))
+        return list
+    }
+
+    /** Targets for a file type (extension) without needing a real file. */
+    fun targetsForExt(context: Context, ext: String): List<OpenTarget> {
+        val e = ext.lowercase()
+        val kind = kindOfExt(e)
+        val ids = LinkedHashSet<String>()
+        if (e in docExts) ids.add("doc")
+        if (e in webExts) ids.add("web")
+        if (e in dbExts) ids.add("sqlite")
+        when (kind) {
+            FileKind.IMAGE -> ids.add("image")
+            FileKind.VIDEO, FileKind.AUDIO -> ids.add("media")
+            FileKind.PDF -> ids.add("pdf")
+            FileKind.ARCHIVE, FileKind.APK -> ids.add("archive")
+            else -> {}
+        }
+        if (e == "xml") ids.add("axml")
         ids.add("text")
         ids.add("archive")
         ids.add("hex")
-
-        val list = ArrayList<OpenTarget>()
-        for (id in ids) {
-            var label = builtinLabels[id] ?: id
-            if (id == "text" && item.size > MAX_EDIT_BYTES) label = "VersaFiles Text viewer"
-            list.add(OpenTarget("b:$id", label, true))
-        }
-        list.addAll(external(context, item.file))
+        val list = ArrayList<OpenTarget>(builtinTargets(ids, "VersaFiles Text editor"))
+        val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(e) ?: "*/*"
+        list.addAll(external(context, mime, null, e))
         return list
     }
 
     @Suppress("DEPRECATION")
-    private fun external(context: Context, file: File): List<OpenTarget> {
+    private fun external(context: Context, mime: String, file: File?, ext: String = "sample"): List<OpenTarget> {
         return try {
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            val uri = if (file != null) {
+                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            } else {
+                Uri.parse("content://${context.packageName}.fileprovider/root/sample.$ext")
+            }
             val intent = Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, mimeOf(file))
+                .setDataAndType(uri, mime)
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             val pm = context.packageManager
             pm.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
@@ -134,7 +221,7 @@ object OpenWith {
                 }
                 .distinctBy { it.id }
                 .sortedBy { it.label.lowercase() }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             emptyList()
         }
     }
@@ -147,7 +234,7 @@ object OpenWith {
                 .setClassName(t.pkg, t.cls)
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Toast.makeText(context, "Can't open with ${t.label}", Toast.LENGTH_SHORT).show()
         }
     }

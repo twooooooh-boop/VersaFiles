@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -206,6 +207,7 @@ fun WebViewerScreen(file: File, onClose: () -> Unit) {
     ViewerScaffold(file.name, "web view", onClose) { padding ->
         AndroidView(
             factory = { ctx ->
+                try {
                 WebView(ctx).apply {
                     webViewClient = WebViewClient()
                     settings.javaScriptEnabled = true
@@ -216,6 +218,9 @@ fun WebViewerScreen(file: File, onClose: () -> Unit) {
                     settings.useWideViewPort = true
                     loadUrl("file://" + file.absolutePath)
                     web = this
+                }
+                } catch (e: Throwable) {
+                    android.widget.TextView(ctx).apply { text = "Web view is not available on this device" }
                 }
             },
             modifier = Modifier
@@ -441,6 +446,32 @@ fun DocViewerScreen(file: File, onClose: () -> Unit) {
                             modifier = Modifier.padding(vertical = 2.dp)
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+/** Read-only text screen (used for decoded binary XML such as AndroidManifest.xml). */
+@Composable
+fun TextViewerScreen(title: String, subtitle: String?, text: String, onClose: () -> Unit) {
+    val lines = remember(text) { text.split("\n") }
+    ViewerScaffold(title, subtitle, onClose) { padding ->
+        SelectionContainer {
+            LazyColumn(
+                Modifier
+                    .padding(padding)
+                    .fillMaxSize()
+                    .horizontalScroll(rememberScrollState())
+            ) {
+                items(lines) { line ->
+                    Text(
+                        line.ifEmpty { " " },
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        softWrap = false,
+                        modifier = Modifier.padding(horizontal = 8.dp)
+                    )
                 }
             }
         }

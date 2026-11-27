@@ -266,6 +266,20 @@ fun SettingsScreen(vm: FileManagerViewModel) {
             SwitchRow("Show thumbnails", "Turn off for the fastest scrolling", s.showThumbs) { v ->
                 vm.updateSettings { it.copy(showThumbs = v) }
             }
+            LabelText("Show thumbnails for")
+            listOf(
+                "Images" to 1,
+                "Videos" to 2,
+                "Audio cover art" to 4,
+                "App icons (APK)" to 8,
+                "PDF first page" to 16
+            ).forEach { (label, bit) ->
+                SwitchRow(label, null, (s.thumbMask and bit) != 0) { v ->
+                    vm.updateSettings {
+                        it.copy(thumbMask = if (v) it.thumbMask or bit else it.thumbMask and bit.inv())
+                    }
+                }
+            }
             SwitchRow("Show file sizes", null, s.showSizes) { v ->
                 vm.updateSettings { it.copy(showSizes = v) }
             }
@@ -323,6 +337,24 @@ fun SettingsScreen(vm: FileManagerViewModel) {
                     else "Files open with your saved or first choice"
                 )
             }
+            LabelText("Built-in text editor opens files up to")
+            val editorOptions = listOf(100, 200, 500, 1000)
+            ChipRow(
+                listOf("100 KB", "200 KB", "500 KB", "1 MB"),
+                editorOptions.indexOf(s.editorMaxKb).coerceAtLeast(0)
+            ) { i -> vm.updateSettings { it.copy(editorMaxKb = editorOptions[i]) } }
+            Text(
+                "Bigger files, binary files and files with giant lines open in a safe read-only viewer.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp)
+            )
+            OutlinedButton(
+                onClick = { vm.openAssociations() },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) { Text("File associations (choose an app per file type)") }
             LabelText("Always-open choices")
             val defaults = SharedState.defaults
             if (defaults.isEmpty()) {
@@ -411,7 +443,7 @@ fun SettingsScreen(vm: FileManagerViewModel) {
 
             SectionTitle("About")
             Text(
-                "VersaFiles 1.5",
+                "VersaFiles 1.6",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 16.dp, bottom = 32.dp)

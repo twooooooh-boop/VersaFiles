@@ -7,6 +7,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -19,7 +21,7 @@ import kotlin.concurrent.thread
 
 const val MAX_EDIT_BYTES = 200L * 1024
 
-enum class Page { FILES, TRASH, ANALYZER, DUPLICATES, CLEANER, APPS, SHARE, ARCHIVE, SETTINGS }
+enum class Page { FILES, TRASH, ANALYZER, DUPLICATES, CLEANER, APPS, SHARE, ARCHIVE, ASSOCIATIONS, SETTINGS }
 
 data class PasteBuffer(val files: List<File>, val move: Boolean)
 
@@ -31,6 +33,8 @@ data class UiMessage(
 )
 
 data class ViewerState(val files: List<File>, val index: Int)
+
+data class DecodedDoc(val title: String, val text: String)
 
 private class PendingDelete(val restore: () -> Unit, val commit: () -> Unit)
 
@@ -144,6 +148,10 @@ class FileManagerViewModel : ViewModel() {
         private set
     var docFile by mutableStateOf<File?>(null)
         private set
+    var axmlDoc by mutableStateOf<DecodedDoc?>(null)
+        private set
+    var assocEditor by mutableStateOf<AssocEditor?>(null)
+        private set
 
     // shared between all tabs
     var settings: Settings
@@ -180,6 +188,16 @@ class FileManagerViewModel : ViewModel() {
     private var pending: PendingDelete? = null
     private var pendingJob: Job? = null
     private var archiveSession: ArchiveSession? = null
+
+    /** Any unexpected error inside a background job becomes a message instead of a crash. */
+    private val safeHandler = CoroutineExceptionHandler { _, e ->
+        if (e !is CancellationException) {
+            showMessage("Something went wrong: ${e.message ?: e.javaClass.simpleName}")
+        }
+    }
+
+    private fun launchSafe(block: suspend CoroutineScope.() -> Unit): Job =
+        viewModelScope.launch(safeHandler, block = block)
 
     fun attach(context: Context, applyStart: Boolean = true) {
         if (appContext != null) return
@@ -274,7 +292,7 @@ class FileManagerViewModel : ViewModel() {
     }
 
     fun clearThumbCache() {
-        viewModelScope.launch {
+        launchSafe {
             withContext(Dispatchers.IO) { Thumbs.clear() }
             showMessage("Thumbnail cache cleared")
         }
@@ -322,7 +340,7 @@ class FileManagerViewModel : ViewModel() {
         val ctx = appContext ?: return
         val hidden = showHidden
         val t = trash
-        viewModelScope.launch {
+        launchSafe {
             val result = withContext(Dispatchers.IO) {
                 val list: List<FileItem> = try {
                     Categories.recent(ctx, 15, hidden)
@@ -352,7 +370,7 @@ class FileManagerViewModel : ViewModel() {
         val hidden = showHidden
         val first = settings.foldersFirst
         val ctx = appContext
-        loadJob = viewModelScope.launch {
+        loadJob = launchSafe {
             loading = true
             if (q.isNotBlank()) delay(250)
             val searchOn = q.isNotBlank() || kinds.isNotEmpty()
@@ -478,21 +496,22 @@ class FileManagerViewModel : ViewModel() {
         val ctx = appContext ?: return
         val raw = item.nameKey.substringAfterLast('.', "")
         val key = if (raw.isEmpty()) "(none)" else raw
-        viewModelScope.launch {
-            val targets = withContext(Dispatchers.IO) { OpenWith.targets(ctx, item) }
+        launchSafe {
+            val maxEdit = settings.editorMaxKb * 1024L
+            val targets = withContext(Dispatchers.IO) { OpenWith.targets(ctx, item, maxEdit) }
             if (!forceAsk) {
                 val saved = SharedState.defaults[key]
                 val savedTarget = if (saved != null) targets.firstOrNull { it.id == saved } else null
                 if (savedTarget != null) {
                     launchTarget(savedTarget, item, pool)
-                    return@launch
+                    return@launchSafe
                 }
                 if (!settings.askOpenWith) {
                     targets.firstOrNull()?.let { launchTarget(it, item, pool) }
-                    return@launch
+                    return@launchSafe
                 }
             }
-            openRequest = OpenRequest(item, pool, targets, key)
+            openRequest = OpenRequest(item, pool, targets, key, SharedState.defaults[key])
         }
     }
 
@@ -531,7 +550,11 @@ class FileManagerViewModel : ViewModel() {
             appContext?.let { OpenWith.launchExternal(it, item.file, t) }
             return
         }
-        when (t.id.removePrefix("b:")) {
+        launchBuiltin(t.id.removePrefix("b:"), item, pool)
+    }
+
+    private fun launchBuiltin(id: String, item: FileItem, pool: List<FileItem>) {
+        when (id) {
             "image" -> {
                 val images = pool.filter { it.kind == FileKind.IMAGE }.map { it.file }
                 val list = if (item.file in images) images else listOf(item.file)
@@ -539,13 +562,84 @@ class FileManagerViewModel : ViewModel() {
             }
             "media" -> playing = item.file
             "pdf" -> pdfFile = item.file
-            "text" -> if (item.size <= MAX_EDIT_BYTES) editing = item.file else bigText = item.file
+            "text" -> openText(item)
+            "axml" -> openAxml(item)
             "archive" -> openArchive(item.file)
             "hex" -> hexFile = item.file
             "web" -> webFile = item.file
             "sqlite" -> dbFile = item.file
             "doc" -> docFile = item.file
         }
+    }
+
+    /** Never opens binary or monster-line files in the editor: they go to a safe viewer instead. */
+    private fun openText(item: FileItem) {
+        val maxEdit = settings.editorMaxKb * 1024L
+        launchSafe {
+            val mode = withContext(Dispatchers.IO) {
+                try {
+                    when {
+                        Sniffer.isAxml(item.file) -> 1
+                        Sniffer.isBinary(item.file) -> 2
+                        item.size > maxEdit || Sniffer.hasHugeLine(item.file, 20_000) -> 3
+                        else -> 0
+                    }
+                } catch (e: Throwable) {
+                    2
+                }
+            }
+            when (mode) {
+                1 -> openAxml(item)
+                2 -> {
+                    showMessage("This is a binary file, so it opened in the hex viewer")
+                    hexFile = item.file
+                }
+                3 -> bigText = item.file
+                else -> editing = item.file
+            }
+        }
+    }
+
+    private fun openAxml(item: FileItem) {
+        launchSafe {
+            val text = withContext(Dispatchers.IO) { Axml.decodeFile(item.file) }
+            if (text != null) {
+                axmlDoc = DecodedDoc(item.name, text)
+            } else {
+                showMessage("Can't decode this file, so it opened in the hex viewer")
+                hexFile = item.file
+            }
+        }
+    }
+
+    fun closeAxml() {
+        axmlDoc = null
+    }
+
+    // ---------- file associations ----------
+
+    fun openAssociations() {
+        page = Page.ASSOCIATIONS
+    }
+
+    fun editAssociation(ext: String) {
+        val ctx = appContext ?: return
+        launchSafe {
+            val targets = withContext(Dispatchers.IO) { OpenWith.targetsForExt(ctx, ext) }
+            assocEditor = AssocEditor(ext, targets, SharedState.defaults[ext])
+        }
+    }
+
+    fun setAssociation(ext: String, id: String) {
+        val map = SharedState.defaults + (ext to id)
+        SharedState.defaults = map
+        prefs?.openDefaults = map
+        assocEditor = null
+        showMessage("Always open .$ext files with ${OpenWith.describe(id)}")
+    }
+
+    fun closeAssocEditor() {
+        assocEditor = null
     }
 
     fun closeHex() {
@@ -633,7 +727,7 @@ class FileManagerViewModel : ViewModel() {
         progress: TaskProgress? = null,
         work: () -> String
     ) {
-        viewModelScope.launch {
+        launchSafe {
             busy = label
             currentProgress = progress
             undoAction = null
@@ -697,7 +791,7 @@ class FileManagerViewModel : ViewModel() {
     private fun registerPending(p: PendingDelete) {
         commitPending()
         pending = p
-        pendingJob = viewModelScope.launch {
+        pendingJob = launchSafe {
             delay(15_000)
             if (pending === p) {
                 pending = null
@@ -950,7 +1044,7 @@ class FileManagerViewModel : ViewModel() {
         archiveItems = emptyList()
         archiveLoading = true
         archiveSession = null
-        viewModelScope.launch {
+        launchSafe {
             val s = ArchiveSession(file)
             val ok = withContext(Dispatchers.IO) {
                 try {
@@ -1026,7 +1120,7 @@ class FileManagerViewModel : ViewModel() {
     fun openArchiveEntry(entry: ArchiveEntryItem) {
         val s = archiveSession ?: return
         val ctx = appContext ?: return
-        viewModelScope.launch {
+        launchSafe {
             busy = "Opening ${entry.name}…"
             val result = withContext(Dispatchers.IO) {
                 runCatching { s.extractToCache(File(ctx.cacheDir, "archive_tmp"), entry.path) }
@@ -1070,7 +1164,7 @@ class FileManagerViewModel : ViewModel() {
 
     fun loadTrash() {
         val t = trash ?: return
-        viewModelScope.launch {
+        launchSafe {
             val r = withContext(Dispatchers.IO) {
                 val list = t.list()
                 list to t.totalSize(list)
@@ -1116,7 +1210,7 @@ class FileManagerViewModel : ViewModel() {
         analyzerJob?.cancel()
         analyzing = true
         scannedCount = 0L
-        analyzerJob = viewModelScope.launch {
+        analyzerJob = launchSafe {
             val result = withContext(Dispatchers.IO) {
                 Analyzer.scan(
                     Environment.getExternalStorageDirectory(),
@@ -1140,7 +1234,7 @@ class FileManagerViewModel : ViewModel() {
         dupProgress = 0L
         dupSelected = emptySet()
         dupGroups = emptyList()
-        dupJob = viewModelScope.launch {
+        dupJob = launchSafe {
             val result = withContext(Dispatchers.IO) {
                 Duplicates.scan(
                     Environment.getExternalStorageDirectory(),
@@ -1188,7 +1282,7 @@ class FileManagerViewModel : ViewModel() {
         cleanProgress = 0L
         cleanSelected = emptySet()
         cleanGroups = emptyList()
-        cleanJob = viewModelScope.launch {
+        cleanJob = launchSafe {
             val result = withContext(Dispatchers.IO) {
                 Cleaner.scan(
                     Environment.getExternalStorageDirectory(),
@@ -1242,7 +1336,7 @@ class FileManagerViewModel : ViewModel() {
     fun loadApps() {
         val ctx = appContext ?: return
         appsLoading = true
-        viewModelScope.launch {
+        launchSafe {
             apps = withContext(Dispatchers.IO) {
                 try {
                     AppsRepo.list(ctx)

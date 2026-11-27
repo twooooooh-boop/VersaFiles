@@ -401,3 +401,133 @@ fun ShareScreen(vm: FileManagerViewModel) {
         }
     }
 }
+
+private val assocGroups = listOf(
+    "Images" to listOf("jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "svg"),
+    "Video" to listOf("mp4", "mkv", "webm", "avi", "mov", "3gp"),
+    "Audio" to listOf("mp3", "wav", "flac", "ogg", "m4a", "aac", "opus"),
+    "Documents" to listOf("pdf", "docx", "xlsx", "pptx", "odt", "epub", "rtf", "txt", "md", "csv"),
+    "Code and data" to listOf("json", "xml", "html", "css", "js", "kt", "java", "py", "lua", "log", "sql", "yml"),
+    "Archives" to listOf("zip", "7z", "rar", "tar", "gz", "iso", "love", "jar"),
+    "Apps" to listOf("apk", "apks", "xapk"),
+    "Databases" to listOf("db", "sqlite")
+)
+
+@Composable
+private fun AssocRow(ext: String, current: String?, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                if (ext == "(none)") "Files without extension" else ".$ext",
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Text(
+                if (current == null) "Ask every time" else OpenWith.describe(current),
+                style = MaterialTheme.typography.bodySmall,
+                color = if (current == null) MaterialTheme.colorScheme.onSurfaceVariant
+                else MaterialTheme.colorScheme.primary
+            )
+        }
+        Icon(Icons.Default.ChevronRight, contentDescription = null)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AssociationsScreen(vm: FileManagerViewModel) {
+    BackHandler { vm.closePage() }
+    val defaults = SharedState.defaults
+    var query by remember { mutableStateOf("") }
+    var custom by remember { mutableStateOf("") }
+    val q = query.trim().trimStart('.').lowercase()
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("File associations") },
+                navigationIcon = {
+                    IconButton(onClick = { vm.closePage() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    TextButton(onClick = { vm.clearAllDefaults() }) { Text("Reset all") }
+                }
+            )
+        }
+    ) { padding ->
+        LazyColumn(
+            Modifier
+                .padding(padding)
+                .fillMaxSize()
+        ) {
+            item {
+                Text(
+                    "Choose which app opens each type of file. Types set to \"Ask every time\" show the Open with list.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+            item {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    placeholder = { Text("Search file types") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                )
+            }
+            item {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = custom,
+                        onValueChange = { custom = it },
+                        singleLine = true,
+                        label = { Text("Add a type, for example log") },
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = {
+                        val e = custom.trim().trimStart('.').lowercase()
+                        if (e.isNotEmpty()) {
+                            vm.editAssociation(e)
+                            custom = ""
+                        }
+                    }) { Text("Add") }
+                }
+            }
+            assocGroups.forEach { (title, exts) ->
+                val shown = exts.filter { q.isEmpty() || it.contains(q) }
+                if (shown.isNotEmpty()) {
+                    item(key = "t:$title") { SectionTitle(title) }
+                    items(shown, key = { "$title:$it" }) { ext ->
+                        AssocRow(ext, defaults[ext]) { vm.editAssociation(ext) }
+                    }
+                }
+            }
+            val known = assocGroups.flatMap { it.second }.toSet()
+            val others = defaults.keys.filter { it !in known && (q.isEmpty() || it.contains(q)) }.sorted()
+            if (others.isNotEmpty()) {
+                item(key = "t:others") { SectionTitle("Your other types") }
+                items(others, key = { "o:$it" }) { ext ->
+                    AssocRow(ext, defaults[ext]) { vm.editAssociation(ext) }
+                }
+            }
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}

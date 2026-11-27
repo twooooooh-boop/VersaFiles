@@ -115,15 +115,59 @@ private fun TargetIcon(t: OpenTarget) {
     }
 }
 
+@Composable
+private fun TargetList(
+    targets: List<OpenTarget>,
+    selectedId: String?,
+    defaultId: String?,
+    onSelect: (String) -> Unit
+) {
+    LazyColumn(Modifier.heightIn(max = 420.dp)) {
+        items(targets, key = { it.id }) { t ->
+            val isSel = t.id == selectedId
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(if (isSel) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
+                    .clickable { onSelect(t.id) }
+                    .padding(horizontal = 8.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TargetIcon(t)
+                Spacer(Modifier.width(16.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        t.label,
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (t.id == defaultId) {
+                        Text(
+                            "Current default",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** The "Open with" list with JUST ONCE / ALWAYS, styled after the Android system chooser. */
 @Composable
 fun OpenWithDialog(
     request: OpenRequest,
     onDismiss: () -> Unit,
-    onChoose: (OpenTarget, Boolean) -> Unit
+    onChoose: (OpenTarget, Boolean) -> Unit,
+    onClearDefault: () -> Unit
 ) {
     var selectedId by remember(request) { mutableStateOf<String?>(null) }
+    var defaultCleared by remember(request) { mutableStateOf(false) }
     val selected = request.targets.firstOrNull { it.id == selectedId }
+    val defaultId = if (defaultCleared) null else request.currentDefault
+    val defaultLabel = request.targets.firstOrNull { it.id == defaultId }?.label
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Open with") },
@@ -136,31 +180,24 @@ fun OpenWithDialog(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(8.dp))
-                LazyColumn(Modifier.heightIn(max = 420.dp)) {
-                    items(request.targets, key = { it.id }) { t ->
-                        val isSel = t.id == selectedId
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .background(
-                                    if (isSel) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent
-                                )
-                                .clickable { selectedId = t.id }
-                                .padding(horizontal = 8.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            TargetIcon(t)
-                            Spacer(Modifier.width(16.dp))
-                            Text(
-                                t.label,
-                                style = MaterialTheme.typography.bodyLarge,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
+                if (defaultLabel != null) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Default for these files: $defaultLabel",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = {
+                            defaultCleared = true
+                            onClearDefault()
+                        }) { Text("CLEAR") }
                     }
                 }
+                Spacer(Modifier.height(8.dp))
+                TargetList(request.targets, selectedId, defaultId) { selectedId = it }
             }
         },
         dismissButton = {
@@ -174,6 +211,43 @@ fun OpenWithDialog(
                 enabled = selected != null,
                 onClick = { if (selected != null) onChoose(selected, true) }
             ) { Text("ALWAYS") }
+        }
+    )
+}
+
+/** Choose (or clear) the default app for a whole file type from Settings. */
+@Composable
+fun AssociationDialog(
+    editor: AssocEditor,
+    onSet: (String) -> Unit,
+    onAsk: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var selectedId by remember(editor) { mutableStateOf(editor.current) }
+    val title = if (editor.ext == "(none)") "Files without extension" else "Open .${editor.ext} files with"
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                Text(
+                    if (editor.current == null) "Currently: ask every time"
+                    else "Currently: ${OpenWith.describe(editor.current)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                TargetList(editor.targets, selectedId, editor.current) { selectedId = it }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onAsk) { Text("ASK EVERY TIME") }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = selectedId != null,
+                onClick = { selectedId?.let { onSet(it) } }
+            ) { Text("SET DEFAULT") }
         }
     )
 }

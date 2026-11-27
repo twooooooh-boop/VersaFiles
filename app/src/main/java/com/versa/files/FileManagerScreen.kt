@@ -150,6 +150,7 @@ fun FileManagerScreen(vm0: FileManagerViewModel, tabs: TabsViewModel) {
             Page.APPS -> AppsScreen(active)
             Page.SHARE -> ShareScreen(active)
             Page.ARCHIVE -> ArchiveScreen(active)
+            Page.ASSOCIATIONS -> AssociationsScreen(active)
             Page.SETTINGS -> SettingsScreen(active)
             Page.FILES -> {}
         }
@@ -169,11 +170,26 @@ fun FileManagerScreen(vm0: FileManagerViewModel, tabs: TabsViewModel) {
         active.webFile?.let { f -> WebViewerScreen(f) { active.closeWeb() } }
         active.dbFile?.let { f -> SqliteViewerScreen(f) { active.closeDb() } }
         active.docFile?.let { f -> DocViewerScreen(f) { active.closeDoc() } }
+        active.axmlDoc?.let { d ->
+            TextViewerScreen(d.title, "decoded binary XML (read only)", d.text) { active.closeAxml() }
+        }
+        active.assocEditor?.let { e ->
+            AssociationDialog(
+                editor = e,
+                onSet = { id -> active.setAssociation(e.ext, id) },
+                onAsk = {
+                    active.clearDefault(e.ext)
+                    active.closeAssocEditor()
+                },
+                onDismiss = { active.closeAssocEditor() }
+            )
+        }
         active.openRequest?.let { r ->
             OpenWithDialog(
                 request = r,
                 onDismiss = { active.dismissOpenRequest() },
-                onChoose = { t, always -> active.chooseTarget(t, always) }
+                onChoose = { t, always -> active.chooseTarget(t, always) },
+                onClearDefault = { active.clearDefault(r.key) }
             )
         }
         active.playing?.let { f ->

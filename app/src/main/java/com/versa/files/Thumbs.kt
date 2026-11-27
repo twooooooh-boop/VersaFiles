@@ -322,7 +322,16 @@ fun FileIcon(kind: FileKind, size: Dp = 40.dp) {
 fun FileThumb(item: FileItem, selected: Boolean, size: Dp, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val density = LocalDensity.current
-    val showThumbs = LocalSettings.current.showThumbs
+    val st = LocalSettings.current
+    val bit = when (item.kind) {
+        FileKind.IMAGE -> 1
+        FileKind.VIDEO -> 2
+        FileKind.AUDIO -> 4
+        FileKind.APK -> 8
+        FileKind.PDF -> 16
+        else -> 0
+    }
+    val showThumbs = st.showThumbs && (bit == 0 || (st.thumbMask and bit) != 0)
     val px = ((with(density) { size.roundToPx() } + 63) / 64) * 64
     val bitmap by produceState<Bitmap?>(
         if (showThumbs) Thumbs.peek(item, px) else null,

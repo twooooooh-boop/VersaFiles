@@ -21,7 +21,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -46,11 +50,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashGuard.install(applicationContext)
+        val crashReport = CrashGuard.consumeReport(applicationContext)
         vm.attach(applicationContext)
         enableEdgeToEdge()
         setContent {
             VersaTheme(vm.settings) {
-                Root(vm, tabs)
+                Root(vm, tabs, crashReport)
             }
         }
     }
@@ -66,8 +72,29 @@ private fun hasStorageAccess(context: Context): Boolean =
     }
 
 @Composable
-private fun Root(vm: FileManagerViewModel, tabs: TabsViewModel) {
+private fun Root(vm: FileManagerViewModel, tabs: TabsViewModel, crashReport: String?) {
     val context = LocalContext.current
+    var report by remember { mutableStateOf(crashReport) }
+    val clipboard = LocalClipboardManager.current
+    report?.let { r ->
+        AlertDialog(
+            onDismissRequest = { report = null },
+            title = { Text("VersaFiles recovered from an error") },
+            text = {
+                Text(
+                    "Something unexpected happened and the app restarted by itself. " +
+                        "You can copy the error report and send it to get it fixed."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    clipboard.setText(AnnotatedString(r))
+                    report = null
+                }) { Text("Copy report") }
+            },
+            dismissButton = { TextButton(onClick = { report = null }) { Text("Dismiss") } }
+        )
+    }
     var granted by remember { mutableStateOf(hasStorageAccess(context)) }
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
